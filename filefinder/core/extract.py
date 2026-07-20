@@ -8,7 +8,11 @@ from pathlib import Path
 from filefinder.archive.idx_wpk import LoadedEntry, extract_matching_entries
 from filefinder.lookup.thy import LookupResult, ThyLookupTable
 
+from .neox_xml import NEOX_BINARY_MAGIC, neox_bytes_to_text
 from .paths import ParsedInput, discover_archives, output_path_for, parse_asset_path, resolve_thy_path
+
+
+NX_XML_EXTENSIONS = {".gim", ".mtg", ".mtl"}
 
 
 @dataclass(frozen=True)
@@ -110,7 +114,7 @@ def _extract_lookups(
     lookups: list[AssetLookup],
     *,
     output_root: Path,
-    decode: bool,
+    auto_decode_nx_xml: bool,
 ) -> tuple[list[WrittenAsset], list[MissingAsset]]:
     written: list[WrittenAsset] = []
     missing: list[MissingAsset] = []
@@ -124,7 +128,7 @@ def _extract_lookups(
         found_entries: dict[str, tuple[Path, LoadedEntry]] = {}
 
         for idx_path in archive.idx_paths:
-            found = extract_matching_entries(idx_path, remaining, decode=decode)
+            found = extract_matching_entries(idx_path, remaining)
             for hash_hex, entry in found.items():
                 if hash_hex not in found_entries:
                     found_entries[hash_hex] = (idx_path, entry)
@@ -145,19 +149,34 @@ def _extract_lookups(
                 item.request.archive.prefix,
                 item.request.normalized_path,
             )
+            output_data = _maybe_decode_nx_xml(
+                entry.data,
+                item.request.normalized_path,
+                auto_decode=auto_decode_nx_xml,
+            )
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(entry.data)
+            output_path.write_bytes(output_data)
             written.append(
                 WrittenAsset(
                     request=item.request,
                     hash128_hex=hash_hex,
                     source_archive=source_archive,
                     output_path=output_path,
-                    byte_count=len(entry.data),
+                    byte_count=len(output_data),
                 )
             )
 
     return written, missing
+
+
+def _maybe_decode_nx_xml(data: bytes, normalized_path: str, *, auto_decode: bool) -> bytes:
+    if not auto_decode:
+        return data
+    if Path(normalized_path).suffix.lower() not in NX_XML_EXTENSIONS:
+        return data
+    if not data.startswith(NEOX_BINARY_MAGIC):
+        return data
+    return neox_bytes_to_text(data).encode("utf-8")
 
 
 def extract_assets(
@@ -165,8 +184,8 @@ def extract_assets(
     raw_paths: list[str],
     *,
     output_root: Path,
-    decode: bool = True,
     strict_lookup: bool = True,
+    auto_decode_nx_xml: bool = True,
 ) -> ExtractionReport:
     archives = discover_archives(game_root)
     if not archives:
@@ -193,7 +212,11 @@ def extract_assets(
         optional_lookup_keys=set(tga_fallbacks),
     )
     primary_lookup_keys = {_request_key(item.request) for item in lookups}
-    written, missing = _extract_lookups(lookups, output_root=output_root, decode=decode)
+    written, missing = _extract_lookups(
+        lookups,
+        output_root=output_root,
+        auto_decode_nx_xml=auto_decode_nx_xml,
+    )
 
     written_keys = {_request_key(item.request) for item in written}
     fallback_requests = [
@@ -215,7 +238,7 @@ def extract_assets(
     fallback_written, fallback_missing = _extract_lookups(
         fallback_lookups,
         output_root=output_root,
-        decode=decode,
+        auto_decode_nx_xml=auto_decode_nx_xml,
     )
 
     missing = [

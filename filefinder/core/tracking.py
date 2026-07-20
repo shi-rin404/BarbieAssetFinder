@@ -35,7 +35,7 @@ def extract_assets_with_tracking(
     output_root: Path,
     file_types: set[str],
     texture_types: set[str],
-    decode: bool = True,
+    auto_decode_nx_xml: bool = True,
 ) -> ExtractionReport:
     archives = discover_archives(game_root)
     if not archives:
@@ -47,7 +47,14 @@ def extract_assets_with_tracking(
     source_requests = [parse_asset_path(raw_path, archives) for raw_path in raw_paths]
     source_raws = {_canonical_raw(request) for request in source_requests}
     wanted_raws = _wanted_raws(source_raws)
-    reports = [extract_assets(game_root, raw_paths, output_root=output_root, decode=decode)]
+    reports = [
+        extract_assets(
+            game_root,
+            raw_paths,
+            output_root=output_root,
+            auto_decode_nx_xml=auto_decode_nx_xml,
+        )
+    ]
 
     direct_raws = _direct_conversion_raws(source_requests, file_types)
     wanted_raws.update(_wanted_raws(direct_raws))
@@ -57,7 +64,14 @@ def extract_assets_with_tracking(
     mtg_intermediate_raws = mtg_trace_raws - wanted_raws
     first_pass_raws = sorted((direct_raws | mtg_trace_raws) - source_raws)
     if first_pass_raws:
-        reports.append(_extract_optional_assets(game_root, first_pass_raws, output_root=output_root, decode=decode))
+        reports.append(
+            _extract_optional_assets(
+                game_root,
+                first_pass_raws,
+                output_root=output_root,
+                auto_decode_nx_xml=auto_decode_nx_xml,
+            )
+        )
 
     mtg_requests = _parse_existing(first_pass_raws, archives)
     mtg_requests.extend(request for request in source_requests if _extension(request.normalized_path) == "mtg")
@@ -73,7 +87,14 @@ def extract_assets_with_tracking(
     mtl_intermediate_raws = mtl_trace_raws - wanted_raws
     second_pass_raws = sorted((mtl_raws | mtl_trace_raws) - _written_raws(reports))
     if second_pass_raws:
-        reports.append(_extract_optional_assets(game_root, second_pass_raws, output_root=output_root, decode=decode))
+        reports.append(
+            _extract_optional_assets(
+                game_root,
+                second_pass_raws,
+                output_root=output_root,
+                auto_decode_nx_xml=auto_decode_nx_xml,
+            )
+        )
 
     if needs_mtl_trace:
         mtl_requests = _parse_existing(second_pass_raws, archives)
@@ -91,7 +112,7 @@ def extract_assets_with_tracking(
                     game_root,
                     sorted(texture_raws),
                     output_root=output_root,
-                    decode=decode,
+                    auto_decode_nx_xml=auto_decode_nx_xml,
                 )
             )
 
@@ -106,14 +127,14 @@ def _extract_optional_assets(
     raw_paths: list[str],
     *,
     output_root: Path,
-    decode: bool,
+    auto_decode_nx_xml: bool,
 ) -> ExtractionReport:
     return extract_assets(
         game_root,
         _dedupe(raw_paths),
         output_root=output_root,
-        decode=decode,
         strict_lookup=False,
+        auto_decode_nx_xml=auto_decode_nx_xml,
     )
 
 

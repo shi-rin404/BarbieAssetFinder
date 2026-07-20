@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import logging
 import sys
 import tkinter as tk
@@ -21,6 +22,13 @@ from filefinder.core.tracking import extract_assets_with_tracking
 
 FILE_TRACKING_OPTIONS = ("Mesh", "Texture", "GIM", "MTL", "MTG", "STB")
 TEXTURE_TRACKING_OPTIONS = ("Diffuse", "Normal", "Metal", "Grab All")
+
+
+@dataclass(frozen=True)
+class CliRunOptions:
+    file_tracking: set[str]
+    texture_tracking: set[str]
+    auto_decode_nx_xml: bool = True
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -47,7 +55,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--raw",
         action="store_true",
-        help="Write raw payload bytes without stage1 or nested payload decoding",
+        help="Do not decode binary NX-XML GIM, MTG, and MTL files when writing outputs",
     )
     parser.add_argument(
         "--list-archives",
@@ -136,9 +144,17 @@ def ask_indexed_options(output: CliOutput, title: str, options: tuple[str, ...])
         return selected
 
 
-def ask_file_tracking_options(output: CliOutput) -> tuple[set[str], set[str]]:
-    if not ask_yes_no(output, "Use file tracking?"):
-        return set(), set()
+def ask_additional_options(output: CliOutput) -> CliRunOptions:
+    output.console.print(
+        "\n[bold]Additional options[/bold]\n"
+        "  [cyan]1[/cyan] Auto Decode NX-XML [green]enabled by default[/green]\n"
+        "  [cyan]2[/cyan] File Tracking"
+    )
+    if not ask_yes_no(output, "Use any additional option?"):
+        return CliRunOptions(file_tracking=set(), texture_tracking=set(), auto_decode_nx_xml=True)
+
+    if sys.platform.startswith("win") and sys.stdin.isatty():
+        return interactive_additional_options_menu(output)
 
     file_tracking = ask_indexed_options(output, "File Tracking", FILE_TRACKING_OPTIONS)
     texture_tracking: set[str] = set()
@@ -147,10 +163,135 @@ def ask_file_tracking_options(output: CliOutput) -> tuple[set[str], set[str]]:
         if not texture_tracking:
             output.console.print("[yellow]No texture type selected. Texture tracking will be skipped.[/yellow]")
             file_tracking.discard("Texture")
-    return file_tracking, texture_tracking
+    return CliRunOptions(
+        file_tracking=file_tracking,
+        texture_tracking=texture_tracking,
+        auto_decode_nx_xml=True,
+    )
 
 
-def tracking_options_from_args(args: argparse.Namespace) -> tuple[set[str], set[str]]:
+def interactive_additional_options_menu(output: CliOutput) -> CliRunOptions:
+    import ctypes
+    import msvcrt
+
+    auto_decode_nx_xml = True
+    file_tracking: set[str] = set()
+    texture_tracking: set[str] = set()
+    menu_items = [
+        ("auto", "Auto Decode NX-XML"),
+        ("file:Mesh", "File Tracking: Mesh"),
+        ("file:Texture", "File Tracking: Texture"),
+        ("file:GIM", "File Tracking: GIM"),
+        ("file:MTL", "File Tracking: MTL"),
+        ("file:MTG", "File Tracking: MTG"),
+        ("file:STB", "File Tracking: STB"),
+        ("texture:Diffuse", "Texture Tracking: Diffuse"),
+        ("texture:Normal", "Texture Tracking: Normal"),
+        ("texture:Metal", "Texture Tracking: Metal"),
+        ("texture:Grab All", "Texture Tracking: Grab All"),
+    ]
+    selected_index = 0
+    shift_was_down = False
+
+    def is_shift_down() -> bool:
+        return bool(ctypes.windll.user32.GetAsyncKeyState(0x10) & 0x8000)
+
+    def is_checked(key: str) -> bool:
+        if key == "auto":
+            return auto_decode_nx_xml
+        if key.startswith("file:"):
+            return key.split(":", 1)[1] in file_tracking
+        if key.startswith("texture:"):
+            return key.split(":", 1)[1] in texture_tracking
+        return False
+
+    def render() -> None:
+        output.console.clear()
+        output.console.print(
+            "[bold]Additional Options[/bold]\n"
+            "[cyan]Up/Down[/cyan]: Navigate    [cyan]Space[/cyan]: Toggle    "
+            "[cyan]Shift[/cyan]: Confirm\n"
+        )
+        for index, (key, label) in enumerate(menu_items):
+            pointer = ">" if index == selected_index else " "
+            marker = "[x]" if is_checked(key) else "[ ]"
+            style = "reverse" if index == selected_index else ""
+            output.console.print(f"{pointer} {marker} {label}", style=style)
+
+    def toggle(key: str) -> None:
+        nonlocal auto_decode_nx_xml
+        if key == "auto":
+            auto_decode_nx_xml = not auto_decode_nx_xml
+            return
+
+        if key.startswith("file:"):
+            option = key.split(":", 1)[1]
+            if option in file_tracking:
+                file_tracking.remove(option)
+                if option == "Texture":
+                    texture_tracking.clear()
+            else:
+                file_tracking.add(option)
+            return
+
+        if key.startswith("texture:"):
+            option = key.split(":", 1)[1]
+            file_tracking.add("Texture")
+            if option == "Grab All":
+                if option in texture_tracking:
+                    texture_tracking.remove(option)
+                else:
+                    texture_tracking.clear()
+                    texture_tracking.add(option)
+                return
+            texture_tracking.discard("Grab All")
+            if option in texture_tracking:
+                texture_tracking.remove(option)
+            else:
+                texture_tracking.add(option)
+
+    render()
+    while True:
+        shift_down = is_shift_down()
+        if shift_down and not shift_was_down:
+            output.console.clear()
+            if "Texture" in file_tracking and not texture_tracking:
+                texture_tracking.add("Grab All")
+            return CliRunOptions(
+                file_tracking=file_tracking,
+                texture_tracking=texture_tracking,
+                auto_decode_nx_xml=auto_decode_nx_xml,
+            )
+        shift_was_down = shift_down
+
+        if not msvcrt.kbhit():
+            time.sleep(0.05)
+            continue
+
+        char = msvcrt.getwch()
+        if char in ("\x00", "\xe0"):
+            code = msvcrt.getwch()
+            if code == "H":
+                selected_index = (selected_index - 1) % len(menu_items)
+            elif code == "P":
+                selected_index = (selected_index + 1) % len(menu_items)
+        elif char == " ":
+            toggle(menu_items[selected_index][0])
+        elif char in ("\r", "\n"):
+            output.console.clear()
+            if "Texture" in file_tracking and not texture_tracking:
+                texture_tracking.add("Grab All")
+            return CliRunOptions(
+                file_tracking=file_tracking,
+                texture_tracking=texture_tracking,
+                auto_decode_nx_xml=auto_decode_nx_xml,
+            )
+        elif char == "\x03":
+            raise KeyboardInterrupt
+        render()
+
+
+def tracking_options_from_args(args: argparse.Namespace) -> CliRunOptions:
     file_tracking = parse_option_tokens(args.track or [], FILE_TRACKING_OPTIONS, "file tracking")
     texture_tracking = parse_option_tokens(
         args.track_texture or [],
@@ -161,7 +302,11 @@ def tracking_options_from_args(args: argparse.Namespace) -> tuple[set[str], set[
         file_tracking.add("Texture")
     if "Texture" in file_tracking and not texture_tracking:
         texture_tracking.add("Grab All")
-    return file_tracking, texture_tracking
+    return CliRunOptions(
+        file_tracking=file_tracking,
+        texture_tracking=texture_tracking,
+        auto_decode_nx_xml=not args.raw,
+    )
 
 
 def parse_option_tokens(tokens: list[str], valid_options: tuple[str, ...], label: str) -> set[str]:
@@ -321,29 +466,28 @@ def main(argv: list[str] | None = None) -> int:
             mod_folder = choose_mod_folder()
             output.console.print(f"[green]Selected folder:[/green] {mod_folder}")
 
-        raw_paths = flatten_input_paths(args.paths) if args.paths else interactive_path_queue(game_root, output)
-        if args.track or args.track_texture:
-            file_tracking, texture_tracking = tracking_options_from_args(args)
-        elif args.paths:
-            file_tracking, texture_tracking = set(), set()
+        if args.paths:
+            run_options = tracking_options_from_args(args)
+            raw_paths = flatten_input_paths(args.paths)
         else:
-            file_tracking, texture_tracking = ask_file_tracking_options(output)
+            run_options = ask_additional_options(output)
+            raw_paths = interactive_path_queue(game_root, output)
 
-        if file_tracking:
+        if run_options.file_tracking:
             report = extract_assets_with_tracking(
                 game_root,
                 raw_paths,
                 output_root=args.output_root,
-                file_types=file_tracking,
-                texture_types=texture_tracking,
-                decode=not args.raw,
+                file_types=run_options.file_tracking,
+                texture_types=run_options.texture_tracking,
+                auto_decode_nx_xml=run_options.auto_decode_nx_xml,
             )
         else:
             report = extract_assets(
                 game_root,
                 raw_paths,
                 output_root=args.output_root,
-                decode=not args.raw,
+                auto_decode_nx_xml=run_options.auto_decode_nx_xml,
             )
         if mod_folder is not None:
             copy_result = copy_report_to_mod_folder(

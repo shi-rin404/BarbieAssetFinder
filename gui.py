@@ -216,6 +216,16 @@ class CheckableComboBox(QPushButton):
                 checked.add(text)
         return checked
 
+    def set_checked(self, text: str, checked: bool) -> None:
+        action = self.actions_by_text.get(text)
+        if action is None:
+            return
+        action.setChecked(checked)
+
+    def is_checked(self, text: str) -> bool:
+        action = self.actions_by_text.get(text)
+        return bool(action and action.isChecked())
+
     def nested_checked_items(self, text: str) -> set[str]:
         return {
             child_text
@@ -307,7 +317,7 @@ class FileFinderWindow(QMainWindow):
 
         input_row = QHBoxLayout()
         self.path_input = QLineEdit()
-        self.path_input.setPlaceholderText("Paste asset path with archive prefix, then press Enter")
+        self.path_input.setPlaceholderText("Paste asset path with archive prefix")
         self.add_button = QPushButton("Add")
         self.add_button.setObjectName("PrimaryButton")
         self.add_button.setToolTip("Shortcut: Enter")
@@ -340,15 +350,24 @@ class FileFinderWindow(QMainWindow):
         self.mod_folder_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.browse_mod_folder_button = QPushButton("Browse")
         self.browse_mod_folder_button.setObjectName("SubtleButton")
+        self.auto_decode_combo = CheckableComboBox(
+            "Auto Decode NX-XML",
+            ["Auto Decode NX-XML"],
+        )
+        self.auto_decode_combo.set_checked("Auto Decode NX-XML", True)
         self.file_tracking_combo = CheckableComboBox(
             "File Tracking",
             ["Mesh", "Texture", "GIM", "MTL", "MTG", "STB"],
             nested_items={"Texture": ["Diffuse", "Normal", "Metal", "Grab All"]},
         )
+        tracking_options_row = QHBoxLayout()
+        tracking_options_row.addWidget(self.auto_decode_combo, 0, Qt.AlignLeft)
+        tracking_options_row.addStretch(1)
+        tracking_options_row.addWidget(self.file_tracking_combo, 0, Qt.AlignRight)
         options_layout.addWidget(self.mod_folder_checkbox, 0, 0)
         options_layout.addWidget(self.mod_folder_label, 0, 1, Qt.AlignRight)
         options_layout.addWidget(self.browse_mod_folder_button, 0, 2, Qt.AlignRight)
-        options_layout.addWidget(self.file_tracking_combo, 1, 0, 1, 3)
+        options_layout.addLayout(tracking_options_row, 1, 0, 1, 3)
         self.mod_folder_label.setVisible(False)
         self.browse_mod_folder_button.setVisible(False)
         left_layout.addWidget(options_card)
@@ -690,6 +709,7 @@ class FileFinderWindow(QMainWindow):
         try:
             file_tracking = self.file_tracking_combo.checked_items()
             texture_tracking = self.file_tracking_combo.nested_checked_items("Texture")
+            auto_decode_nx_xml = self.auto_decode_combo.is_checked("Auto Decode NX-XML")
             if file_tracking:
                 report = extract_assets_with_tracking(
                     self.game_root,
@@ -697,14 +717,14 @@ class FileFinderWindow(QMainWindow):
                     output_root=OUTPUT_ROOT,
                     file_types=file_tracking,
                     texture_types=texture_tracking,
-                    decode=True,
+                    auto_decode_nx_xml=auto_decode_nx_xml,
                 )
             else:
                 report = extract_assets(
                     self.game_root,
                     raw_paths,
                     output_root=OUTPUT_ROOT,
-                    decode=True,
+                    auto_decode_nx_xml=auto_decode_nx_xml,
                 )
             self.update_queue_tooltips(report)
             copy_result = self.copy_to_mod_folder(report)
@@ -775,6 +795,7 @@ class FileFinderWindow(QMainWindow):
         self.path_input.setEnabled(not busy)
         self.mod_folder_checkbox.setEnabled(not busy)
         self.browse_mod_folder_button.setEnabled(not busy)
+        self.auto_decode_combo.setEnabled(not busy)
         self.file_tracking_combo.setEnabled(not busy)
         if busy:
             QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))

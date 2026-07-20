@@ -292,14 +292,14 @@ class IDXWPKArchive:
         self._dir_index_cache[slot_dir] = cached
         return cached
 
-    def load_entry(self, entry: IndexEntry, *, decode: bool = True) -> LoadedEntry:
+    def load_entry(self, entry: IndexEntry) -> LoadedEntry:
         loaded = LoadedEntry(**entry.__dict__)
         loaded.source_mode = self.mode
-        self._load_entry_data(loaded, decode=decode)
+        self._load_entry_data(loaded)
         self.entries[entry.index] = loaded
         return loaded
 
-    def _load_entry_data(self, entry: LoadedEntry, *, decode: bool) -> None:
+    def _load_entry_data(self, entry: LoadedEntry) -> None:
         pkg_id = entry.pkg_id
 
         if self.mode == "idx" and self.is_slot_file_pkg(pkg_id):
@@ -345,9 +345,7 @@ class IDXWPKArchive:
         entry.raw_data = raw_data
         entry.payload_data = payload
 
-        if not decode:
-            entry.data = payload
-        elif entry.is_slot_file:
+        if entry.is_slot_file:
             processed, decoded, tag, used_skip_header_decode = decode_slot_payload_auto(
                 payload,
                 context=f"{entry.filename} pkg={pkg_id} source={entry.source_mode}",
@@ -366,12 +364,11 @@ class IDXWPKArchive:
             entry.stage1_decoded = decoded
             entry.stage1_tag = tag
 
-        if decode:
-            entry.data, entry.unwrap_layers, extra_flags = unwrap_nested_payloads(
-                entry.data,
-                context=f"{entry.filename} pkg={pkg_id} source={entry.source_mode}",
-            )
-            entry.data_flags |= extra_flags
+        entry.data, entry.unwrap_layers, extra_flags = unwrap_nested_payloads(
+            entry.data,
+            context=f"{entry.filename} pkg={pkg_id} source={entry.source_mode}",
+        )
+        entry.data_flags |= extra_flags
 
         entry.file_length = len(entry.data)
         entry.file_original_length = len(entry.data)
@@ -431,8 +428,6 @@ def build_index_from_embedded_header(
 def extract_matching_entries(
     archive_path: Path,
     target_hashes: set[str],
-    *,
-    decode: bool = True,
 ) -> dict[str, LoadedEntry]:
     """Return decoded entries whose raw hash is in target_hashes."""
     found: dict[str, LoadedEntry] = {}
@@ -440,6 +435,5 @@ def extract_matching_entries(
         for index_entry in archive.indices:
             if index_entry.raw_hash_hex in found:
                 continue
-            found[index_entry.raw_hash_hex] = archive.load_entry(index_entry, decode=decode)
+            found[index_entry.raw_hash_hex] = archive.load_entry(index_entry)
     return found
-
