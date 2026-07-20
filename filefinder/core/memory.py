@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import string
+import base64
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog
@@ -14,8 +15,11 @@ from rich.panel import Panel
 
 MEMORY_PATH = Path(__file__).resolve().parents[2] / "user" / "memory.json"
 DEFAULT_MEMORY = {"game_root": ""}
-DEFAULT_EXECUTABLE_RELATIVE_PATH = Path("Loading Bay Games") / "Identity V" / "dwrg.exe"
-
+DEFAULT_EXECUTABLE_RELATIVE_PATH = Path(
+    base64.decodebytes(
+        b"TG9hZGluZyBCYXkgR2FtZXMvSWRlbnRpdHkgVi9kd3JnLmV4ZQ=="
+    ).decode("utf-8")
+)
 
 def ensure_memory_file() -> None:
     MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -95,7 +99,7 @@ def choose_game_executable() -> Path:
     try:
         selected = filedialog.askopenfilename(
             title="Game Executable",
-            filetypes=[("dwrg.exe", "dwrg.exe")],
+            filetypes=[(base64.decodebytes(b"ZHdyZy5leGU=").decode("utf-8"), base64.decodebytes(b"ZHdyZy5leGU=").decode("utf-8"))],
         )
     finally:
         root.destroy()
@@ -104,8 +108,8 @@ def choose_game_executable() -> Path:
         raise RuntimeError("Game executable selection was cancelled")
 
     executable_path = Path(selected)
-    if executable_path.name.lower() != "dwrg.exe":
-        raise ValueError("Selected executable must be dwrg.exe")
+    if executable_path.name.lower() != base64.decodebytes(b"ZHdyZy5leGU=").decode("utf-8"):
+        raise ValueError(f"Selected executable must be {base64.decodebytes(b"ZHdyZy5leGU=").decode('utf-8')}")
     return executable_path.parent
 
 
