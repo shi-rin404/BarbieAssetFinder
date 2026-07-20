@@ -1,0 +1,6 @@
+cryptography
+lz4
+PySide6
+rich
+zstandard
+tkintertable
