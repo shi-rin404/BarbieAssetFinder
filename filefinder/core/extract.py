@@ -56,29 +56,62 @@ def _lookup_group(game_root: Path, requests: list[ParsedInput]) -> list[AssetLoo
     ]
 
 
-def extract_assets(
-    game_root: Path,
-    raw_paths: list[str],
-    *,
-    output_root: Path,
-    decode: bool = True,
-) -> ExtractionReport:
-    archives = discover_archives(game_root)
-    if not archives:
-        raise FileNotFoundError(
-            f"No common .idx archives were found in {game_root / 'res'} "
-            f"and {game_root / 'Documents' / 'res'}"
-        )
+def _request_key(request: ParsedInput) -> tuple[str, str]:
+    return (request.archive.prefix, request.normalized_path)
 
-    parsed = [parse_asset_path(raw_path, archives) for raw_path in raw_paths]
+
+def _canonical_raw(request: ParsedInput) -> str:
+    return f"{request.archive.prefix}/{request.normalized_path}"
+
+
+def _with_extension(request: ParsedInput, extension: str) -> ParsedInput:
+    stem = request.normalized_path.rsplit(".", 1)[0]
+    return ParsedInput(
+        raw_path=request.raw_path,
+        archive=request.archive,
+        normalized_path=ThyLookupTable.normalize_path(f"{stem}.{extension}"),
+    )
+
+
+def _is_tga_request(request: ParsedInput) -> bool:
+    return request.normalized_path.lower().endswith(".tga")
+
+
+def _lookup_requests(
+    game_root: Path,
+    requests: list[ParsedInput],
+    *,
+    strict_lookup: bool,
+    optional_lookup_keys: set[tuple[str, str]] | None = None,
+) -> list[AssetLookup]:
+    optional_lookup_keys = optional_lookup_keys or set()
     grouped: dict[str, list[ParsedInput]] = {}
-    for request in parsed:
+    for request in requests:
         grouped.setdefault(request.archive.prefix, []).append(request)
 
     lookups: list[AssetLookup] = []
-    for requests in grouped.values():
-        lookups.extend(_lookup_group(game_root, requests))
+    for grouped_requests in grouped.values():
+        try:
+            lookups.extend(_lookup_group(game_root, grouped_requests))
+            continue
+        except Exception:
+            pass
+        for request in grouped_requests:
+            try:
+                lookups.extend(_lookup_group(game_root, [request]))
+            except Exception:
+                if strict_lookup and _request_key(request) not in optional_lookup_keys:
+                    raise
+                continue
+    return lookups
 
+
+def _extract_lookups(
+    lookups: list[AssetLookup],
+    *,
+    output_root: Path,
+    decode: bool,
+) -> tuple[list[WrittenAsset], list[MissingAsset]]:
     written: list[WrittenAsset] = []
     missing: list[MissingAsset] = []
     lookups_by_prefix: dict[str, list[AssetLookup]] = {}
@@ -124,9 +157,78 @@ def extract_assets(
                 )
             )
 
+    return written, missing
+
+
+def extract_assets(
+    game_root: Path,
+    raw_paths: list[str],
+    *,
+    output_root: Path,
+    decode: bool = True,
+    strict_lookup: bool = True,
+) -> ExtractionReport:
+    archives = discover_archives(game_root)
+    if not archives:
+        raise FileNotFoundError(
+            f"No common .idx archives were found in {game_root / 'res'} "
+            f"and {game_root / 'Documents' / 'res'}"
+        )
+
+    parsed = [parse_asset_path(raw_path, archives) for raw_path in raw_paths]
+    primary_requests: list[ParsedInput] = []
+    tga_fallbacks: dict[tuple[str, str], ParsedInput] = {}
+    for request in parsed:
+        if _is_tga_request(request):
+            primary = _with_extension(request, "dds")
+            primary_requests.append(primary)
+            tga_fallbacks[_request_key(primary)] = request
+            continue
+        primary_requests.append(request)
+
+    lookups = _lookup_requests(
+        game_root,
+        primary_requests,
+        strict_lookup=strict_lookup,
+        optional_lookup_keys=set(tga_fallbacks),
+    )
+    primary_lookup_keys = {_request_key(item.request) for item in lookups}
+    written, missing = _extract_lookups(lookups, output_root=output_root, decode=decode)
+
+    written_keys = {_request_key(item.request) for item in written}
+    fallback_requests = [
+        fallback
+        for primary_key, fallback in tga_fallbacks.items()
+        if primary_key not in written_keys
+    ]
+    fallback_lookups = _lookup_requests(game_root, fallback_requests, strict_lookup=False)
+    fallback_lookup_raws = {item.request.raw_path for item in fallback_lookups}
+    if strict_lookup:
+        unresolved_lookup_requests = [
+            request
+            for request in fallback_requests
+            if _request_key(_with_extension(request, "dds")) not in primary_lookup_keys
+            and request.raw_path not in fallback_lookup_raws
+        ]
+        if unresolved_lookup_requests:
+            _lookup_requests(game_root, unresolved_lookup_requests, strict_lookup=True)
+    fallback_written, fallback_missing = _extract_lookups(
+        fallback_lookups,
+        output_root=output_root,
+        decode=decode,
+    )
+
+    missing = [
+        item
+        for item in missing
+        if item.request.raw_path not in fallback_lookup_raws
+    ]
+    lookups.extend(fallback_lookups)
+    written.extend(fallback_written)
+    missing.extend(fallback_missing)
+
     return ExtractionReport(
         lookups=tuple(lookups),
         written=tuple(written),
         missing=tuple(missing),
     )
-

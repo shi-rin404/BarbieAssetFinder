@@ -8,9 +8,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QDir, QMimeData, QModelIndex, QSortFilterProxyModel, Qt, QUrl
-from PySide6.QtGui import QAction, QCloseEvent, QCursor, QKeySequence, QShortcut
+from PySide6.QtCore import QDir, QMimeData, QModelIndex, QSortFilterProxyModel, Qt, QUrl, Signal
+from PySide6.QtGui import QAction, QCloseEvent, QCursor, QDrag, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QFileDialog,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -41,6 +43,7 @@ from filefinder.core.memory import (
 )
 from filefinder.core.mod_copy import ModCopyResult, copy_report_to_mod_folder
 from filefinder.core.paths import discover_archives, parse_asset_path
+from filefinder.core.tracking import extract_assets_with_tracking
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -89,6 +92,162 @@ class FileNameFilterProxy(QSortFilterProxyModel):
         if self.accepted_paths is None:
             return True
         return file_path.resolve(strict=False) in self.accepted_paths
+
+
+class OutputTreeView(QTreeView):
+    """Tree view that exports selected output files as native file-url drags."""
+
+    def startDrag(self, supported_actions: Qt.DropActions) -> None:
+        paths: list[Path] = []
+        model = self.model()
+        if model is None:
+            return
+
+        for proxy_index in self.selectionModel().selectedRows(0):
+            source_index = model.mapToSource(proxy_index)
+            source_model = model.sourceModel()
+            path = Path(source_model.filePath(source_index))
+            if is_output_path(path):
+                paths.append(path)
+
+        if not paths:
+            return
+
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(path)) for path in paths])
+        mime.setText("\n".join(str(path) for path in paths))
+
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.MoveAction | Qt.CopyAction, Qt.MoveAction)
+
+
+class PersistentCheckMenu(QMenu):
+    """Keep checkable menu selections open until the user clicks outside."""
+
+    def mouseReleaseEvent(self, event) -> None:
+        action = self.activeAction()
+        if action is None:
+            super().mouseReleaseEvent(event)
+            return
+        if action.isCheckable():
+            action.trigger()
+            event.accept()
+            return
+        if action.menu() is not None:
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class CheckableComboBox(QPushButton):
+    """Combo-like multi-select button backed by a checkable menu."""
+
+    changed = Signal()
+
+    def __init__(
+        self,
+        placeholder: str,
+        items: list[str],
+        *,
+        nested_items: dict[str, list[str]] | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.placeholder = placeholder
+        self.actions_by_text: dict[str, QAction] = {}
+        self.nested_actions: dict[str, dict[str, QAction]] = {}
+        self.dropdown_menu = PersistentCheckMenu(self)
+        self.ignore_next_popup = False
+        self.setObjectName("ComboButton")
+        self.clicked.connect(self.toggle_dropdown)
+        self.dropdown_menu.aboutToHide.connect(self.on_dropdown_about_to_hide)
+
+        nested_items = nested_items or {}
+        for text in items:
+            if text in nested_items:
+                submenu = PersistentCheckMenu(text, self.dropdown_menu)
+                submenu.setObjectName("ComboMenu")
+                submenu.aboutToHide.connect(self.on_dropdown_about_to_hide)
+                self.nested_actions[text] = {}
+                for child_text in nested_items[text]:
+                    child_action = QAction(child_text, submenu)
+                    child_action.setCheckable(True)
+                    child_action.toggled.connect(self.on_action_toggled)
+                    submenu.addAction(child_action)
+                    self.nested_actions[text][child_text] = child_action
+                self.dropdown_menu.addMenu(submenu)
+                continue
+
+            action = QAction(text, self.dropdown_menu)
+            action.setCheckable(True)
+            action.toggled.connect(self.on_action_toggled)
+            self.dropdown_menu.addAction(action)
+            self.actions_by_text[text] = action
+        self.update_display_text()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self.isEnabled():
+            self.toggle_dropdown()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def toggle_dropdown(self) -> None:
+        if self.ignore_next_popup:
+            self.ignore_next_popup = False
+            return
+        if self.dropdown_menu.isVisible():
+            self.dropdown_menu.hide()
+            return
+        self.show_dropdown()
+
+    def show_dropdown(self) -> None:
+        self.dropdown_menu.popup(self.mapToGlobal(self.rect().bottomLeft()))
+
+    def on_dropdown_about_to_hide(self) -> None:
+        if self.rect().contains(self.mapFromGlobal(QCursor.pos())):
+            self.ignore_next_popup = True
+
+    def checked_items(self) -> set[str]:
+        checked = {text for text, action in self.actions_by_text.items() if action.isChecked()}
+        for text, actions in self.nested_actions.items():
+            if any(action.isChecked() for action in actions.values()):
+                checked.add(text)
+        return checked
+
+    def nested_checked_items(self, text: str) -> set[str]:
+        return {
+            child_text
+            for child_text, action in self.nested_actions.get(text, {}).items()
+            if action.isChecked()
+        }
+
+    def on_action_toggled(self) -> None:
+        self.sync_texture_grab_all()
+        self.update_display_text()
+        self.changed.emit()
+
+    def update_display_text(self) -> None:
+        selected = sorted(self.checked_items())
+        self.setText(", ".join(selected) if selected else self.placeholder)
+
+    def sync_texture_grab_all(self) -> None:
+        texture_actions = self.nested_actions.get("Texture", {})
+        grab_all = texture_actions.get("Grab All")
+        if grab_all is None:
+            return
+
+        muted = grab_all.isChecked()
+        for text in ("Diffuse", "Normal", "Metal"):
+            action = texture_actions.get(text)
+            if action is None:
+                continue
+            previous_state = action.blockSignals(True)
+            if muted:
+                action.setChecked(False)
+            action.setEnabled(not muted)
+            action.blockSignals(previous_state)
 
 
 class FileFinderWindow(QMainWindow):
@@ -151,6 +310,7 @@ class FileFinderWindow(QMainWindow):
         self.path_input.setPlaceholderText("Paste asset path with archive prefix, then press Enter")
         self.add_button = QPushButton("Add")
         self.add_button.setObjectName("PrimaryButton")
+        self.add_button.setToolTip("Shortcut: Enter")
         self.search_button = QPushButton("Search")
         self.search_button.setObjectName("SearchButton")
         input_row.addWidget(self.path_input, 1)
@@ -166,6 +326,7 @@ class FileFinderWindow(QMainWindow):
         self.path_table.setAlternatingRowColors(True)
         self.path_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.path_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.path_table.setContextMenuPolicy(Qt.CustomContextMenu)
         path_layout.addWidget(self.path_table, 1)
         left_layout.addWidget(path_card, 2)
 
@@ -175,12 +336,21 @@ class FileFinderWindow(QMainWindow):
         options_layout.setColumnStretch(1, 1)
         self.mod_folder_checkbox = QCheckBox("Send into selected folder")
         self.mod_folder_label = QLabel("No folder selected")
-        self.mod_folder_label.setObjectName("MutedLabel")
+        self.mod_folder_label.setObjectName("OptionPathLabel")
+        self.mod_folder_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.browse_mod_folder_button = QPushButton("Browse")
         self.browse_mod_folder_button.setObjectName("SubtleButton")
-        options_layout.addWidget(self.mod_folder_checkbox, 0, 0, 1, 2)
-        options_layout.addWidget(self.mod_folder_label, 1, 0, 1, 2)
-        options_layout.addWidget(self.browse_mod_folder_button, 1, 2)
+        self.file_tracking_combo = CheckableComboBox(
+            "File Tracking",
+            ["Mesh", "Texture", "GIM", "MTL", "MTG", "STB"],
+            nested_items={"Texture": ["Diffuse", "Normal", "Metal", "Grab All"]},
+        )
+        options_layout.addWidget(self.mod_folder_checkbox, 0, 0)
+        options_layout.addWidget(self.mod_folder_label, 0, 1, Qt.AlignRight)
+        options_layout.addWidget(self.browse_mod_folder_button, 0, 2, Qt.AlignRight)
+        options_layout.addWidget(self.file_tracking_combo, 1, 0, 1, 3)
+        self.mod_folder_label.setVisible(False)
+        self.browse_mod_folder_button.setVisible(False)
         left_layout.addWidget(options_card)
 
         state_frame = QFrame()
@@ -207,11 +377,14 @@ class FileFinderWindow(QMainWindow):
         self.search_input.setPlaceholderText("Search file name in outputs")
         output_layout.addWidget(self.search_input)
 
-        self.file_tree = QTreeView()
+        self.file_tree = OutputTreeView()
         self.file_tree.setSelectionMode(QTreeView.ExtendedSelection)
         self.file_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.file_tree.setSortingEnabled(True)
         self.file_tree.setAlternatingRowColors(True)
+        self.file_tree.setDragEnabled(True)
+        self.file_tree.setDragDropMode(QAbstractItemView.DragOnly)
+        self.file_tree.setDefaultDropAction(Qt.MoveAction)
         output_layout.addWidget(self.file_tree, 1)
         right_layout.addWidget(output_card, 1)
 
@@ -240,8 +413,16 @@ class FileFinderWindow(QMainWindow):
         self.change_game_root_button.clicked.connect(self.change_game_root)
         self.clear_output_button.clicked.connect(self.clear_output_folder)
         self.search_input.textChanged.connect(self.apply_file_filter)
+        self.path_table.customContextMenuRequested.connect(self.open_queue_context_menu)
         self.file_tree.customContextMenuRequested.connect(self.open_context_menu)
 
+        add_return_shortcut = QShortcut(QKeySequence(Qt.Key_Return), self.path_input, activated=self.add_path)
+        add_return_shortcut.setContext(Qt.WidgetShortcut)
+        add_enter_shortcut = QShortcut(QKeySequence(Qt.Key_Enter), self.path_input, activated=self.add_path)
+        add_enter_shortcut.setContext(Qt.WidgetShortcut)
+        QShortcut(QKeySequence.Delete, self.path_table, activated=self.delete_selected_queue_rows)
+        QShortcut(QKeySequence(Qt.Key_Return), self.path_table, activated=self.edit_selected_queue_row)
+        QShortcut(QKeySequence(Qt.Key_Enter), self.path_table, activated=self.edit_selected_queue_row)
         QShortcut(QKeySequence.Copy, self.file_tree, activated=self.copy_selected_files)
         QShortcut(QKeySequence.Cut, self.file_tree, activated=self.cut_selected_files)
         QShortcut(QKeySequence.Delete, self.file_tree, activated=self.delete_selected_files)
@@ -348,10 +529,15 @@ class FileFinderWindow(QMainWindow):
         return True
 
     def _update_mod_folder_label(self) -> None:
-        if self.mod_folder_checkbox.isChecked() and self.mod_folder is not None:
+        enabled = self.mod_folder_checkbox.isChecked()
+        self.mod_folder_label.setVisible(enabled)
+        self.browse_mod_folder_button.setVisible(enabled)
+        if enabled and self.mod_folder is not None:
             self.mod_folder_label.setText(str(self.mod_folder))
+            self.mod_folder_label.setToolTip(str(self.mod_folder))
         else:
             self.mod_folder_label.setText("No folder selected")
+            self.mod_folder_label.setToolTip("")
 
     def add_path(self) -> None:
         raw_path = self.path_input.text().strip()
@@ -367,7 +553,7 @@ class FileFinderWindow(QMainWindow):
             if self.has_queued_path(raw_path):
                 self.status_label.setText("Path is already in the search list")
                 return
-            self.add_queue_row(raw_path, parsed.archive.prefix, parsed.normalized_path)
+            self.add_queue_row(raw_path, parsed.archive.stem, parsed.normalized_path)
             self.path_input.clear()
             self.status_label.setText(f"Queued {self.path_table.rowCount()} path(s)")
         except Exception as exc:
@@ -393,6 +579,93 @@ class FileFinderWindow(QMainWindow):
         self.path_table.setItem(row, 0, archive)
         self.path_table.setItem(row, 1, path)
 
+    def selected_queue_rows(self) -> list[int]:
+        return sorted({index.row() for index in self.path_table.selectionModel().selectedRows()})
+
+    def delete_selected_queue_rows(self) -> None:
+        rows = self.selected_queue_rows()
+        if not rows:
+            return
+        for row in sorted(rows, reverse=True):
+            self.path_table.removeRow(row)
+        self.status_label.setText(f"Queued {self.path_table.rowCount()} path(s)")
+
+    def edit_selected_queue_row(self) -> None:
+        rows = self.selected_queue_rows()
+        if not rows:
+            return
+        self.edit_queue_row(rows[0])
+
+    def edit_queue_row(self, row: int) -> None:
+        raw_item = self.path_table.item(row, 0)
+        if raw_item is None:
+            return
+
+        current_path = raw_item.data(Qt.UserRole)
+        if not isinstance(current_path, str):
+            current_path = ""
+
+        new_path, accepted = QInputDialog.getText(
+            self,
+            "Edit Path",
+            "Path:",
+            QLineEdit.Normal,
+            current_path,
+        )
+        if not accepted:
+            return
+
+        new_path = new_path.strip()
+        if not new_path:
+            return
+        if self.game_root is None:
+            QMessageBox.warning(self, "Game Root", "Select a game executable first.")
+            return
+
+        try:
+            archives = discover_archives(self.game_root)
+            parsed = parse_asset_path(new_path, archives)
+            for existing_row in range(self.path_table.rowCount()):
+                if existing_row == row:
+                    continue
+                item = self.path_table.item(existing_row, 0)
+                if item is not None and item.data(Qt.UserRole) == new_path:
+                    self.status_label.setText("Path is already in the search list")
+                    return
+
+            archive_item = self.path_table.item(row, 0)
+            path_item = self.path_table.item(row, 1)
+            archive_item.setText(parsed.archive.stem)
+            archive_item.setData(Qt.UserRole, new_path)
+            archive_item.setToolTip(new_path)
+            path_item.setText(parsed.normalized_path)
+            path_item.setData(Qt.UserRole, new_path)
+            path_item.setToolTip("Pending search")
+            self.status_label.setText("Queued path updated")
+        except Exception as exc:
+            QMessageBox.critical(self, "Path Edit Failed", str(exc))
+            self.status_label.setText("Path edit failed")
+
+    def open_queue_context_menu(self, position) -> None:
+        row = self.path_table.rowAt(position.y())
+        if row >= 0 and row not in self.selected_queue_rows():
+            self.path_table.selectRow(row)
+
+        menu = QMenu(self)
+        edit_action = QAction("Edit Path", self)
+        delete_action = QAction("Delete", self)
+        edit_action.triggered.connect(self.edit_selected_queue_row)
+        delete_action.triggered.connect(self.delete_selected_queue_rows)
+
+        has_selection = bool(self.selected_queue_rows())
+        edit_action.setEnabled(has_selection)
+        delete_action.setEnabled(has_selection)
+
+        menu.addAction(edit_action)
+        menu.addSeparator()
+        menu.addAction(delete_action)
+        menu.exec(self.path_table.viewport().mapToGlobal(position))
+
     def queued_paths(self) -> list[str]:
         paths: list[str] = []
         for row in range(self.path_table.rowCount()):
@@ -415,15 +688,27 @@ class FileFinderWindow(QMainWindow):
 
         self.set_busy(True)
         try:
-            report = extract_assets(
-                self.game_root,
-                raw_paths,
-                output_root=OUTPUT_ROOT,
-                decode=True,
-            )
+            file_tracking = self.file_tracking_combo.checked_items()
+            texture_tracking = self.file_tracking_combo.nested_checked_items("Texture")
+            if file_tracking:
+                report = extract_assets_with_tracking(
+                    self.game_root,
+                    raw_paths,
+                    output_root=OUTPUT_ROOT,
+                    file_types=file_tracking,
+                    texture_types=texture_tracking,
+                    decode=True,
+                )
+            else:
+                report = extract_assets(
+                    self.game_root,
+                    raw_paths,
+                    output_root=OUTPUT_ROOT,
+                    decode=True,
+                )
             self.update_queue_tooltips(report)
             copy_result = self.copy_to_mod_folder(report)
-            self.refresh_output_root()
+            self.reveal_extracted_output_folders(report)
             status = self.report_status(report)
             if copy_result is not None:
                 status += (
@@ -431,6 +716,7 @@ class FileFinderWindow(QMainWindow):
                     f" ({copy_result.overwritten} overwritten, {copy_result.renamed} renamed)"
                 )
             self.status_label.setText(status)
+            self.clear_queue()
         except Exception as exc:
             QMessageBox.critical(self, "Search Failed", str(exc))
             self.status_label.setText("Search failed")
@@ -448,6 +734,9 @@ class FileFinderWindow(QMainWindow):
                 continue
             status = "Missing" if raw_path in missing_by_raw else "Extracted"
             path_item.setToolTip(f"{status}\nHash128: {lookup.lookup.hash128_hex}")
+
+    def clear_queue(self) -> None:
+        self.path_table.setRowCount(0)
 
     def copy_to_mod_folder(self, report: ExtractionReport) -> ModCopyResult | None:
         if not self.mod_folder_checkbox.isChecked() or self.mod_folder is None:
@@ -484,6 +773,9 @@ class FileFinderWindow(QMainWindow):
         self.add_button.setEnabled(not busy)
         self.search_button.setEnabled(not busy)
         self.path_input.setEnabled(not busy)
+        self.mod_folder_checkbox.setEnabled(not busy)
+        self.browse_mod_folder_button.setEnabled(not busy)
+        self.file_tracking_combo.setEnabled(not busy)
         if busy:
             QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
             return
@@ -495,6 +787,40 @@ class FileFinderWindow(QMainWindow):
         self.file_model.setRootPath(str(OUTPUT_ROOT))
         root_index = self.proxy_model.mapFromSource(self.file_model.index(str(OUTPUT_ROOT)))
         self.file_tree.setRootIndex(root_index)
+
+    def clear_output_filter_for_reveal(self) -> None:
+        if self.search_input.text():
+            self.search_input.blockSignals(True)
+            self.search_input.clear()
+            self.search_input.blockSignals(False)
+        self.proxy_model.set_accepted_paths(None)
+        self.pre_filter_current_path = None
+
+    def reveal_extracted_output_folders(self, report: ExtractionReport) -> None:
+        self.clear_output_filter_for_reveal()
+        self.refresh_output_root()
+        self.file_tree.collapseAll()
+
+        folders = sorted(
+            {item.output_path.parent for item in report.written if is_output_path(item.output_path.parent)},
+            key=lambda path: len(path.parts),
+        )
+        first_folder_index = QModelIndex()
+
+        for folder in folders:
+            current = OUTPUT_ROOT
+            for part in folder.resolve(strict=False).relative_to(OUTPUT_ROOT_RESOLVED).parts:
+                current = current / part
+                source_index = self.file_model.index(str(current))
+                proxy_index = self.proxy_model.mapFromSource(source_index)
+                if proxy_index.isValid():
+                    self.file_tree.expand(proxy_index)
+                    if not first_folder_index.isValid():
+                        first_folder_index = proxy_index
+
+        if first_folder_index.isValid():
+            self.file_tree.setCurrentIndex(first_folder_index)
+            self.file_tree.scrollTo(first_folder_index)
 
     def apply_file_filter(self, text: str) -> None:
         query = text.strip().lower()
@@ -746,6 +1072,22 @@ class FileFinderWindow(QMainWindow):
             QLineEdit:focus {
                 border-color: #4f8cff;
             }
+            #ComboButton {
+                background: #0d1118;
+                border: 1px solid #2e394a;
+                border-radius: 7px;
+                padding: 9px 12px;
+                min-height: 24px;
+                text-align: left;
+            }
+            #ComboButton:hover {
+                border-color: #4f8cff;
+                background: #111722;
+            }
+            #ComboButton:disabled {
+                color: #747d8d;
+                background: #171c25;
+            }
             QPushButton {
                 background: #242c3a;
                 border: 1px solid #334055;
@@ -858,9 +1200,17 @@ class FileFinderWindow(QMainWindow):
             QMenu::item:selected {
                 background: #244f87;
             }
+            QMenu::item:disabled {
+                color: #98a5b8;
+                background: transparent;
+            }
             #MutedLabel {
                 color: #98a5b8;
                 background: #151b25;
+            }
+            #OptionPathLabel {
+                color: #98a5b8;
+                background: #161b24;
             }
             #StatusLabel {
                 color: #9ecbff;

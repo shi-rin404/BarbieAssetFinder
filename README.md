@@ -29,10 +29,11 @@ Execute **"Z_CLI.bat"** or;
 python cli.py
 ```
 
-Press `Enter` to add the typed path into the queue and press `Tab` to search and decompress the queued paths.
+Press `Enter` to add the typed path into the queue and press `Tab` to search and decompress the queued paths. Multi-line pasted path lists are split and queued one path per line.
 
 ## CLI with arguments
 - Split multiple inputs by space
+- Multi-line pasted arguments are split and processed one path per line
 - You might not use " since game pathes naturally doesn't include spaces
 
 ```powershell
