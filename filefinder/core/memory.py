@@ -20,6 +20,7 @@ DEFAULT_EXECUTABLE_RELATIVE_PATH = Path(
         b"TG9hZGluZyBCYXkgR2FtZXMvSWRlbnRpdHkgVi9kd3JnLmV4ZQ=="
     ).decode("utf-8")
 )
+EXECUTABLE_NAME = base64.decodebytes(b"ZHdyZy5leGU=").decode("utf-8")
 
 def ensure_memory_file() -> None:
     MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -99,7 +100,7 @@ def choose_game_executable() -> Path:
     try:
         selected = filedialog.askopenfilename(
             title="Game Executable",
-            filetypes=[(base64.decodebytes(b"ZHdyZy5leGU=").decode("utf-8"), base64.decodebytes(b"ZHdyZy5leGU=").decode("utf-8"))],
+            filetypes=[(EXECUTABLE_NAME, EXECUTABLE_NAME)],
         )
     finally:
         root.destroy()
@@ -108,8 +109,8 @@ def choose_game_executable() -> Path:
         raise RuntimeError("Game executable selection was cancelled")
 
     executable_path = Path(selected)
-    if executable_path.name.lower() != base64.decodebytes(b"ZHdyZy5leGU=").decode("utf-8"):
-        raise ValueError(f"Selected executable must be {base64.decodebytes(b"ZHdyZy5leGU=").decode('utf-8')}")
+    if executable_path.name.lower() != EXECUTABLE_NAME:
+        raise ValueError(f"Selected executable must be {EXECUTABLE_NAME}")
     return executable_path.parent
 
 
