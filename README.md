@@ -10,16 +10,22 @@ pip install -r requirements.txt
 ```
 
 ## GUI
+Execute **"Z_GUI.bat"** or;
 
 ```powershell
 python gui.py
 ```
 
+<img width="1536" height="816" alt="image" src="https://github.com/user-attachments/assets/0cc98f38-a4d3-4bfb-8e6a-471e28edcd3d" />
+
 ## Interactive CLI
+Execute **"Z_CLI.bat"** or;
 
 ```powershell
 python cli.py
 ```
+
+Press `Enter` to add the typed path into the queue and press `Tab` to search and decompress the queued paths.
 
 ## CLI with arguments
 - Split multiple inputs by space
@@ -28,11 +34,3 @@ python cli.py
 ```powershell
 python cli.py "chr/player/dm65_survivor_w/h55_survivor_w_jyz/separate_dir/jyz_e_xiari/jyz_e_xiari.gim" "chr/prop/h55_pendant_quanzhang/separate_dir/jyz_e_xiari/jyz_e_xiari_quanzhang.gim"
 ```
-
-
-
-In interactive mode, press `Enter` to add the typed path into the queue and
-press `Tab` to search and decompress the queued paths.
-
-
-
