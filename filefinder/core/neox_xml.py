@@ -15,8 +15,32 @@ def neox_bytes_to_text(data: bytes) -> str:
     """Return XML text from a NeoX XML or C1 59 41 0D binary XML payload."""
     if data.startswith(NEOX_BINARY_MAGIC):
         roots = _binary_to_roots(data)
-        return "\n".join(ET.tostring(root, encoding="unicode") for root in roots)
-    return data.decode("utf-8-sig")
+        return _roots_to_pretty_text(roots)
+    text = data.decode("utf-8-sig")
+    try:
+        return _roots_to_pretty_text(_parse_xml_roots(text))
+    except ET.ParseError:
+        return text
+
+
+def _roots_to_pretty_text(roots: list[ET.Element]) -> str:
+    output: list[str] = []
+    for root in roots:
+        ET.indent(root, space="    ")
+        output.append(ET.tostring(root, encoding="unicode"))
+    return "\n".join(output)
+
+
+def _parse_xml_roots(text: str) -> list[ET.Element]:
+    stripped = text.strip()
+    if not stripped:
+        return []
+    try:
+        return [ET.fromstring(stripped)]
+    except ET.ParseError:
+        wrapped = f"<FileFinderRoot>{stripped}</FileFinderRoot>"
+        wrapper = ET.fromstring(wrapped)
+        return list(wrapper)
 
 
 def _read_leb128(stream: BytesIO) -> int:

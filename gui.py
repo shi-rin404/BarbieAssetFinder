@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QDir, QMimeData, QModelIndex, QSortFilterProxyModel, Qt, QUrl, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QCursor, QDrag, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QCloseEvent, QCursor, QDesktopServices, QDrag, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -350,18 +350,15 @@ class FileFinderWindow(QMainWindow):
         self.mod_folder_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.browse_mod_folder_button = QPushButton("Browse")
         self.browse_mod_folder_button.setObjectName("SubtleButton")
-        self.auto_decode_combo = CheckableComboBox(
-            "Auto Decode NX-XML",
-            ["Auto Decode NX-XML"],
-        )
-        self.auto_decode_combo.set_checked("Auto Decode NX-XML", True)
+        self.auto_decode_checkbox = QCheckBox("Auto Decode NX-XML")
+        self.auto_decode_checkbox.setChecked(True)
         self.file_tracking_combo = CheckableComboBox(
             "File Tracking",
             ["Mesh", "Texture", "GIM", "MTL", "MTG", "STB"],
             nested_items={"Texture": ["Diffuse", "Normal", "Metal", "Grab All"]},
         )
         tracking_options_row = QHBoxLayout()
-        tracking_options_row.addWidget(self.auto_decode_combo, 0, Qt.AlignLeft)
+        tracking_options_row.addWidget(self.auto_decode_checkbox, 0, Qt.AlignLeft)
         tracking_options_row.addStretch(1)
         tracking_options_row.addWidget(self.file_tracking_combo, 0, Qt.AlignRight)
         options_layout.addWidget(self.mod_folder_checkbox, 0, 0)
@@ -434,6 +431,7 @@ class FileFinderWindow(QMainWindow):
         self.search_input.textChanged.connect(self.apply_file_filter)
         self.path_table.customContextMenuRequested.connect(self.open_queue_context_menu)
         self.file_tree.customContextMenuRequested.connect(self.open_context_menu)
+        self.file_tree.doubleClicked.connect(self.open_file_from_index)
 
         add_return_shortcut = QShortcut(QKeySequence(Qt.Key_Return), self.path_input, activated=self.add_path)
         add_return_shortcut.setContext(Qt.WidgetShortcut)
@@ -562,22 +560,27 @@ class FileFinderWindow(QMainWindow):
         raw_path = self.path_input.text().strip()
         if not raw_path:
             return
+        if self.queue_path(raw_path):
+            self.path_input.clear()
+            self.status_label.setText(f"Queued {self.path_table.rowCount()} path(s)")
+
+    def queue_path(self, raw_path: str) -> bool:
         if self.game_root is None:
             QMessageBox.warning(self, "Game Root", "Select a game executable first.")
-            return
+            return False
 
         try:
             archives = discover_archives(self.game_root)
             parsed = parse_asset_path(raw_path, archives)
             if self.has_queued_path(raw_path):
                 self.status_label.setText("Path is already in the search list")
-                return
+                return True
             self.add_queue_row(raw_path, parsed.archive.stem, parsed.normalized_path)
-            self.path_input.clear()
-            self.status_label.setText(f"Queued {self.path_table.rowCount()} path(s)")
+            return True
         except Exception as exc:
             QMessageBox.critical(self, "Path Normalization Failed", str(exc))
             self.status_label.setText("Path addition failed")
+            return False
 
     def has_queued_path(self, raw_path: str) -> bool:
         for row in range(self.path_table.rowCount()):
@@ -697,6 +700,12 @@ class FileFinderWindow(QMainWindow):
         return paths
 
     def search_paths(self) -> None:
+        pending_path = self.path_input.text().strip()
+        if pending_path:
+            if not self.queue_path(pending_path):
+                return
+            self.path_input.clear()
+
         raw_paths = self.queued_paths()
         if not raw_paths:
             QMessageBox.information(self, "Search", "Add at least one path before searching.")
@@ -709,7 +718,7 @@ class FileFinderWindow(QMainWindow):
         try:
             file_tracking = self.file_tracking_combo.checked_items()
             texture_tracking = self.file_tracking_combo.nested_checked_items("Texture")
-            auto_decode_nx_xml = self.auto_decode_combo.is_checked("Auto Decode NX-XML")
+            auto_decode_nx_xml = self.auto_decode_checkbox.isChecked()
             if file_tracking:
                 report = extract_assets_with_tracking(
                     self.game_root,
@@ -795,7 +804,7 @@ class FileFinderWindow(QMainWindow):
         self.path_input.setEnabled(not busy)
         self.mod_folder_checkbox.setEnabled(not busy)
         self.browse_mod_folder_button.setEnabled(not busy)
-        self.auto_decode_combo.setEnabled(not busy)
+        self.auto_decode_checkbox.setEnabled(not busy)
         self.file_tracking_combo.setEnabled(not busy)
         if busy:
             QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
@@ -933,6 +942,38 @@ class FileFinderWindow(QMainWindow):
                 paths.append(path)
         return paths
 
+    def output_path_from_index(self, proxy_index: QModelIndex) -> Path | None:
+        if not proxy_index.isValid():
+            return None
+        row_index = proxy_index.siblingAtColumn(0)
+        source_index = self.proxy_model.mapToSource(row_index)
+        path = Path(self.file_model.filePath(source_index))
+        if not is_output_path(path):
+            return None
+        return path
+
+    def open_file_from_index(self, proxy_index: QModelIndex) -> None:
+        path = self.output_path_from_index(proxy_index)
+        if path is None or not path.is_file():
+            return
+        self.open_file_path(path)
+
+    def open_selected_file(self) -> None:
+        file_path = next((path for path in self.selected_paths() if path.is_file()), None)
+        if file_path is None:
+            return
+        self.open_file_path(file_path)
+
+    def open_file_path(self, path: Path) -> None:
+        if not is_output_path(path):
+            QMessageBox.warning(self, "Open", "Selected path is outside outputs.")
+            return
+        if not path.is_file():
+            return
+        opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        if not opened:
+            QMessageBox.warning(self, "Open", f"Could not open file:\n{path}")
+
     def copy_selected_files(self) -> None:
         paths = self.selected_paths()
         if not paths:
@@ -1017,20 +1058,26 @@ class FileFinderWindow(QMainWindow):
 
     def open_context_menu(self, position) -> None:
         menu = QMenu(self)
+        open_action = QAction("Open", self)
         copy_action = QAction("Copy", self)
         cut_action = QAction("Cut", self)
         delete_action = QAction("Delete", self)
         open_location_action = QAction("Open file location in File Explorer", self)
 
+        open_action.triggered.connect(self.open_selected_file)
         copy_action.triggered.connect(self.copy_selected_files)
         cut_action.triggered.connect(self.cut_selected_files)
         delete_action.triggered.connect(self.delete_selected_files)
         open_location_action.triggered.connect(self.open_selected_location)
 
-        has_selection = bool(self.selected_paths())
+        selected_paths = self.selected_paths()
+        has_selection = bool(selected_paths)
+        open_action.setEnabled(any(path.is_file() for path in selected_paths))
         for action in (copy_action, cut_action, delete_action, open_location_action):
             action.setEnabled(has_selection)
 
+        menu.addAction(open_action)
+        menu.addSeparator()
         menu.addAction(copy_action)
         menu.addAction(cut_action)
         menu.addSeparator()
