@@ -6,6 +6,7 @@ It inputs one or multiple asset pathes and decompresses it from game archive.
 # Credits
 Archive extractor by [MarcosVLl2](https://github.com/MarcosVLl2) from [NeoXtractor](https://github.com/MarcosVLl2/NeoXtractor)
 
+# Setup
 Install dependencies:
 
 ```powershell
