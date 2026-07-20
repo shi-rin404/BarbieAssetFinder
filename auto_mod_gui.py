@@ -40,6 +40,25 @@ from filefinder.core.paths import discover_archives, parse_asset_path
 APP_DIR = Path(__file__).resolve().parent
 
 
+def ask_yes_no(
+    parent: QWidget,
+    title: str,
+    text: str,
+    *,
+    default_yes: bool = True,
+    icon: QMessageBox.Icon = QMessageBox.Question,
+) -> bool:
+    dialog = QMessageBox(parent)
+    dialog.setWindowTitle(title)
+    dialog.setIcon(icon)
+    dialog.setText(text)
+    no_button = dialog.addButton("No", QMessageBox.ActionRole)
+    yes_button = dialog.addButton("Yes", QMessageBox.ActionRole)
+    dialog.setDefaultButton(yes_button if default_yes else no_button)
+    dialog.exec()
+    return dialog.clickedButton() == yes_button
+
+
 class GuiPrompts(AutoModPrompts):
     def __init__(self, parent: QWidget) -> None:
         self.parent = parent
@@ -128,15 +147,12 @@ class GuiPrompts(AutoModPrompts):
         return self.ask_custom_mod_key(conflicting_key, "Enter a different mod key:")
 
     def ask_use_default_mod_key(self, archive_stem: str, default_key: str) -> bool:
-        dialog = QMessageBox(self.parent)
-        dialog.setWindowTitle("Mod Key")
-        dialog.setIcon(QMessageBox.Question)
-        dialog.setText(f"Use '{default_key}' as mod key for {archive_stem}?{self.context_text()}")
-        no_button = dialog.addButton("No", QMessageBox.ActionRole)
-        yes_button = dialog.addButton("Yes", QMessageBox.ActionRole)
-        dialog.setDefaultButton(yes_button)
-        dialog.exec()
-        return dialog.clickedButton() == yes_button
+        return ask_yes_no(
+            self.parent,
+            "Mod Key",
+            f"Use '{default_key}' as mod key for {archive_stem}?{self.context_text()}",
+            default_yes=True,
+        )
 
     def ask_custom_mod_key(self, default_key: str, label: str) -> str | None:
         value, accepted = QInputDialog.getText(
@@ -236,14 +252,12 @@ class AutoModWindow(QMainWindow):
 
         default_executable = find_default_game_executable()
         if default_executable is not None:
-            result = QMessageBox.question(
+            if ask_yes_no(
                 self,
                 "Game Executable",
                 f"Found game executable:\n\n{default_executable}\n\nUse this path?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
-            )
-            if result == QMessageBox.Yes:
+                default_yes=True,
+            ):
                 self.game_root = default_executable.parent
                 save_game_root(self.game_root)
                 return

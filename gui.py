@@ -51,6 +51,25 @@ OUTPUT_ROOT = APP_DIR / "outputs"
 OUTPUT_ROOT_RESOLVED = OUTPUT_ROOT.resolve()
 
 
+def ask_yes_no(
+    parent: QWidget,
+    title: str,
+    text: str,
+    *,
+    default_yes: bool = True,
+    icon: QMessageBox.Icon = QMessageBox.Question,
+) -> bool:
+    dialog = QMessageBox(parent)
+    dialog.setWindowTitle(title)
+    dialog.setIcon(icon)
+    dialog.setText(text)
+    no_button = dialog.addButton("No", QMessageBox.ActionRole)
+    yes_button = dialog.addButton("Yes", QMessageBox.ActionRole)
+    dialog.setDefaultButton(yes_button if default_yes else no_button)
+    dialog.exec()
+    return dialog.clickedButton() == yes_button
+
+
 def is_output_path(path: Path) -> bool:
     try:
         path.resolve(strict=False).relative_to(OUTPUT_ROOT_RESOLVED)
@@ -493,14 +512,12 @@ class FileFinderWindow(QMainWindow):
 
         default_executable = find_default_game_executable()
         if default_executable is not None:
-            result = QMessageBox.question(
+            if ask_yes_no(
                 self,
                 "Game Executable",
                 f"Found game executable:\n\n{default_executable}\n\nUse this path?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
-            )
-            if result == QMessageBox.Yes:
+                default_yes=True,
+            ):
                 self.set_game_root(default_executable.parent, persist=True)
                 return
 
@@ -1000,14 +1017,13 @@ class FileFinderWindow(QMainWindow):
         paths = self.selected_paths()
         if not paths:
             return
-        result = QMessageBox.question(
+        if not ask_yes_no(
             self,
             "Delete",
             f"Delete {len(paths)} selected item(s)?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if result != QMessageBox.Yes:
+            default_yes=False,
+            icon=QMessageBox.Warning,
+        ):
             return
 
         errors: list[str] = []
@@ -1028,14 +1044,13 @@ class FileFinderWindow(QMainWindow):
         self.status_label.setText(f"Deleted {len(paths) - len(errors)} item(s)")
 
     def clear_output_folder(self) -> None:
-        result = QMessageBox.question(
+        if not ask_yes_no(
             self,
             "Clear Output Folder",
             f"Delete all files and folders inside outputs?\n\n{OUTPUT_ROOT}",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if result != QMessageBox.Yes:
+            default_yes=False,
+            icon=QMessageBox.Warning,
+        ):
             return
 
         errors: list[str] = []

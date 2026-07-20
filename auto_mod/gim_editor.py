@@ -159,10 +159,14 @@ def _bind_socket_objects(
         return
     for socket in sockets:
         socket_name = socket.attrib.get("Name", "")
-        match = re.fullmatch(rf"(?:const_)?{re.escape(skin_name)}_([a-z]+)", socket_name)
-        if not match:
+        skin_first_match = re.fullmatch(rf"(?:const_)?{re.escape(skin_name)}_([a-z]+)", socket_name)
+        object_first_match = re.fullmatch(rf"([a-z]+)_{re.escape(skin_name)}", socket_name)
+        if skin_first_match:
+            object_name = skin_first_match.group(1)
+        elif object_first_match:
+            object_name = object_first_match.group(1)
+        else:
             continue
-        object_name = match.group(1)
         target_path = f"{gim_folder}/{gim_name}_{object_name}.gim"
         resolved = _resolve_socket_target(socket_name, target_path, asset_index, prompt_socket_path)
         if not resolved:
