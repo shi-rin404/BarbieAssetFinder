@@ -1,7 +1,10 @@
-# FileFinderV2
+# Asset Finder for Certain Game Archive Format
+The asset lookup algorithm in certain Doll Dressing-up game has implemented.
 
-Resolve prefixed game asset paths to Hash128 values and extract the matching
-payloads from IDX/WPK archives.
+It inputs one or multiple asset pathes and decompresses it from game archive.
+
+# Credits
+Archive extractor by [MarcosVLl2](https://github.com/MarcosVLl2) from [NeoXtractor](https://github.com/MarcosVLl2/NeoXtractor)
 
 Install dependencies:
 
