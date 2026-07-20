@@ -159,7 +159,7 @@ def _bind_socket_objects(
         return
     for socket in sockets:
         socket_name = socket.attrib.get("Name", "")
-        match = re.fullmatch(rf"const_{re.escape(skin_name)}_([a-z]+)", socket_name)
+        match = re.fullmatch(rf"(?:const_)?{re.escape(skin_name)}_([a-z]+)", socket_name)
         if not match:
             continue
         object_name = match.group(1)

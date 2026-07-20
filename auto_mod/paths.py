@@ -57,6 +57,11 @@ def resolve_dependency_asset_path(
         file_name = basename_stem or root_folder
         return f"{parsed_gim.archive.prefix}/{root_folder}/{file_name}.{extension}"
 
+    if parsed_gim.archive.stem == "chr_prop":
+        root_folder = parsed_gim.normalized_path.split("/", 1)[0]
+        if root_folder == basename_stem:
+            return f"{parsed_gim.archive.prefix}/{root_folder}/{basename_stem}.{extension}"
+
     if "../" not in normalized_value:
         joined = posixpath.normpath(posixpath.join(posixpath.dirname(parsed_gim.normalized_path), normalized_value))
         return f"{parsed_gim.archive.prefix}/{joined}".replace("\\", "/")
