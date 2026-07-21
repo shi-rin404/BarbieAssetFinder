@@ -66,11 +66,10 @@ def parse_asset_path(raw_path: str, archives: dict[str, ArchiveSource]) -> Parse
         if normalized == prefix or normalized.startswith(prefix + "/")
     ]
     if not matches:
-        available = ", ".join(sorted(archives)[:20])
-        suffix = " ..." if len(archives) > 20 else ""
-        raise ValueError(
-            f"No archive prefix matched {raw_path!r}. Available prefixes: {available}{suffix}"
-        )
+        fallback = parse_asset_path_by_root_archive(raw_path, normalized, archives)
+        if fallback is not None:
+            return fallback
+        raise_no_archive_prefix(raw_path, archives)
 
     prefix = max(matches, key=len)
     stripped = normalized[len(prefix) :].strip("/")
@@ -81,6 +80,35 @@ def parse_asset_path(raw_path: str, archives: dict[str, ArchiveSource]) -> Parse
         raw_path=raw_path,
         archive=archives[prefix],
         normalized_path=ThyLookupTable.normalize_path(stripped),
+    )
+
+
+def parse_asset_path_by_root_archive(
+    raw_path: str,
+    normalized: str,
+    archives: dict[str, ArchiveSource],
+) -> ParsedInput | None:
+    root_name, separator, stripped = normalized.partition("/")
+    if not separator or not root_name or not stripped:
+        return None
+
+    archive_by_stem = {archive.stem: archive for archive in archives.values()}
+    archive = archive_by_stem.get(root_name)
+    if archive is None:
+        return None
+
+    return ParsedInput(
+        raw_path=raw_path,
+        archive=archive,
+        normalized_path=ThyLookupTable.normalize_path(stripped),
+    )
+
+
+def raise_no_archive_prefix(raw_path: str, archives: dict[str, ArchiveSource]) -> None:
+    available = ", ".join(sorted(archives)[:20])
+    suffix = " ..." if len(archives) > 20 else ""
+    raise ValueError(
+        f"No archive prefix matched {raw_path!r}. Available prefixes: {available}{suffix}"
     )
 
 
@@ -101,4 +129,3 @@ def resolve_thy_path(game_root: Path, archive_stem: str) -> Path:
 def output_path_for(output_root: Path, prefix: str, normalized_path: str) -> Path:
     parts = [part for part in (prefix + "/" + normalized_path).split("/") if part]
     return output_root.joinpath(*parts)
-

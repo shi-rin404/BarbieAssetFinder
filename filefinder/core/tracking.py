@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from pathlib import Path
 import posixpath
 import re
+import sys
+from typing import Callable
 import xml.etree.ElementTree as ET
 
 from filefinder.lookup.thy import ThyLookupTable
@@ -26,6 +29,18 @@ TEXTURE_KEYS = {
     "Normal": "TexNormal",
 }
 TEXTURE_EXTENSIONS = {".dds", ".tga", ".png", ".jpg", ".jpeg", ".bmp"}
+TrackingErrorCallback = Callable[[str, Exception], None]
+_TRACKING_ERROR_CALLBACK: ContextVar[TrackingErrorCallback | None] = ContextVar(
+    "tracking_error_callback",
+    default=None,
+)
+
+
+def _log_suppressed_error(context: str, exc: Exception) -> None:
+    print(f"[File Tracker] {context}: {type(exc).__name__}: {exc}", file=sys.stderr)
+    callback = _TRACKING_ERROR_CALLBACK.get()
+    if callback is not None:
+        callback(context, exc)
 
 
 def extract_assets_with_tracking(
@@ -36,6 +51,30 @@ def extract_assets_with_tracking(
     file_types: set[str],
     texture_types: set[str],
     auto_decode_nx_xml: bool = True,
+    suppressed_error_callback: TrackingErrorCallback | None = None,
+) -> ExtractionReport:
+    token = _TRACKING_ERROR_CALLBACK.set(suppressed_error_callback)
+    try:
+        return _extract_assets_with_tracking_impl(
+            game_root,
+            raw_paths,
+            output_root=output_root,
+            file_types=file_types,
+            texture_types=texture_types,
+            auto_decode_nx_xml=auto_decode_nx_xml,
+        )
+    finally:
+        _TRACKING_ERROR_CALLBACK.reset(token)
+
+
+def _extract_assets_with_tracking_impl(
+    game_root: Path,
+    raw_paths: list[str],
+    *,
+    output_root: Path,
+    file_types: set[str],
+    texture_types: set[str],
+    auto_decode_nx_xml: bool,
 ) -> ExtractionReport:
     archives = discover_archives(game_root)
     if not archives:
@@ -266,11 +305,12 @@ def _parse_xml_roots(text: str) -> list[ET.Element]:
         return []
     try:
         return [ET.fromstring(stripped)]
-    except ET.ParseError:
+    except ET.ParseError as exc:
         wrapped = f"<FileFinderRoot>{stripped}</FileFinderRoot>"
         try:
             return [ET.fromstring(wrapped)]
-        except ET.ParseError:
+        except ET.ParseError as wrapped_exc:
+            _log_suppressed_error(f"XML parse failed, including wrapped fallback after {exc}", wrapped_exc)
             return []
 
 
@@ -285,15 +325,16 @@ def _reference_to_raw(
     try:
         parse_asset_path(normalized, archives)
         return normalized
-    except Exception:
-        pass
+    except Exception as exc:
+        _log_suppressed_error(f"Reference is not a full archive path: {reference!r}", exc)
 
     parent = posixpath.dirname(base_request.normalized_path)
     joined = posixpath.normpath(posixpath.join(parent, normalized)).replace("\\", "/")
     raw = f"{base_request.archive.prefix}/{joined}"
     try:
         parse_asset_path(raw, archives)
-    except Exception:
+    except Exception as exc:
+        _log_suppressed_error(f"Reference could not be resolved relative to {base_request.raw_path!r}: {reference!r}", exc)
         return None
     return raw
 
@@ -331,7 +372,8 @@ def _parse_existing(raw_paths: set[str] | list[str], archives: dict[str, object]
     for raw_path in _dedupe(raw_paths):
         try:
             parsed.append(parse_asset_path(raw_path, archives))
-        except Exception:
+        except Exception as exc:
+            _log_suppressed_error(f"Could not parse tracked raw path: {raw_path!r}", exc)
             continue
     return parsed
 

@@ -70,6 +70,41 @@ def ask_yes_no(
     return dialog.clickedButton() == yes_button
 
 
+def merge_extraction_reports(reports: list[ExtractionReport]) -> ExtractionReport:
+    lookups = []
+    written = []
+    missing = []
+    seen_lookups: set[tuple[str, str, str]] = set()
+    seen_written: set[tuple[str, Path]] = set()
+    seen_missing: set[tuple[str, str]] = set()
+
+    for report in reports:
+        for item in report.lookups:
+            key = (item.request.raw_path, item.request.archive.prefix, item.request.normalized_path)
+            if key in seen_lookups:
+                continue
+            seen_lookups.add(key)
+            lookups.append(item)
+        for item in report.written:
+            key = (item.request.raw_path, item.output_path)
+            if key in seen_written:
+                continue
+            seen_written.add(key)
+            written.append(item)
+        for item in report.missing:
+            key = (item.request.raw_path, item.hash128_hex)
+            if key in seen_missing:
+                continue
+            seen_missing.add(key)
+            missing.append(item)
+
+    return ExtractionReport(
+        lookups=tuple(lookups),
+        written=tuple(written),
+        missing=tuple(missing),
+    )
+
+
 def is_output_path(path: Path) -> bool:
     try:
         path.resolve(strict=False).relative_to(OUTPUT_ROOT_RESOLVED)
@@ -736,38 +771,91 @@ class FileFinderWindow(QMainWindow):
             file_tracking = self.file_tracking_combo.checked_items()
             texture_tracking = self.file_tracking_combo.nested_checked_items("Texture")
             auto_decode_nx_xml = self.auto_decode_checkbox.isChecked()
-            if file_tracking:
-                report = extract_assets_with_tracking(
-                    self.game_root,
-                    raw_paths,
-                    output_root=OUTPUT_ROOT,
-                    file_types=file_tracking,
-                    texture_types=texture_tracking,
-                    auto_decode_nx_xml=auto_decode_nx_xml,
-                )
-            else:
-                report = extract_assets(
-                    self.game_root,
-                    raw_paths,
-                    output_root=OUTPUT_ROOT,
-                    auto_decode_nx_xml=auto_decode_nx_xml,
-                )
+            report, skipped_errors, tracking_errors = self.extract_queued_paths(
+                raw_paths,
+                file_tracking=file_tracking,
+                texture_tracking=texture_tracking,
+                auto_decode_nx_xml=auto_decode_nx_xml,
+            )
             self.update_queue_tooltips(report)
-            copy_result = self.copy_to_mod_folder(report)
-            self.reveal_extracted_output_folders(report)
+            copy_result = self.copy_to_mod_folder(report) if report.written else None
+            if report.written:
+                self.reveal_extracted_output_folders(report)
             status = self.report_status(report)
             if copy_result is not None:
                 status += (
                     f"; copied {copy_result.copied} to selected folder"
                     f" ({copy_result.overwritten} overwritten, {copy_result.renamed} renamed)"
                 )
+            if skipped_errors:
+                status += f"; skipped {len(skipped_errors)} file(s)"
+            if tracking_errors:
+                status += f"; {len(tracking_errors)} file tracking warning(s)"
             self.status_label.setText(status)
+            if skipped_errors:
+                QMessageBox.warning(
+                    self,
+                    "Search Skipped Files",
+                    "\n\n".join(f"{raw_path}\n{error}" for raw_path, error in skipped_errors[:8]),
+                )
+            if tracking_errors:
+                QMessageBox.warning(
+                    self,
+                    "File Tracking Warnings",
+                    "\n\n".join(
+                        f"{raw_path}\n{message}"
+                        for raw_path, message in tracking_errors[:12]
+                    ),
+                )
             self.clear_queue()
         except Exception as exc:
             QMessageBox.critical(self, "Search Failed", str(exc))
             self.status_label.setText("Search failed")
         finally:
             self.set_busy(False)
+
+    def extract_queued_paths(
+        self,
+        raw_paths: list[str],
+        *,
+        file_tracking: set[str],
+        texture_tracking: set[str],
+        auto_decode_nx_xml: bool,
+    ) -> tuple[ExtractionReport, list[tuple[str, str]], list[tuple[str, str]]]:
+        reports: list[ExtractionReport] = []
+        skipped_errors: list[tuple[str, str]] = []
+        tracking_errors: list[tuple[str, str]] = []
+        for raw_path in raw_paths:
+            try:
+                if file_tracking:
+                    def record_tracking_error(context: str, exc: Exception, current_path: str = raw_path) -> None:
+                        tracking_errors.append(
+                            (current_path, f"{context}: {type(exc).__name__}: {exc}")
+                        )
+
+                    reports.append(
+                        extract_assets_with_tracking(
+                            self.game_root,
+                            [raw_path],
+                            output_root=OUTPUT_ROOT,
+                            file_types=file_tracking,
+                            texture_types=texture_tracking,
+                            auto_decode_nx_xml=auto_decode_nx_xml,
+                            suppressed_error_callback=record_tracking_error,
+                        )
+                    )
+                else:
+                    reports.append(
+                        extract_assets(
+                            self.game_root,
+                            [raw_path],
+                            output_root=OUTPUT_ROOT,
+                            auto_decode_nx_xml=auto_decode_nx_xml,
+                        )
+                    )
+            except Exception as exc:
+                skipped_errors.append((raw_path, str(exc)))
+        return merge_extraction_reports(reports), skipped_errors, tracking_errors
 
     def update_queue_tooltips(self, report: ExtractionReport) -> None:
         lookup_by_raw = {item.request.raw_path: item for item in report.lookups}
