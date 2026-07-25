@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from filefinder.archive.idx_wpk import ArchiveIndexCache
 from filefinder.core.extract import ExtractionReport, extract_assets
 from filefinder.core.memory import (
     find_default_game_executable,
@@ -324,6 +325,7 @@ class FileFinderWindow(QMainWindow):
         self.mod_folder: Path | None = None
         self.last_cut_paths: list[Path] = []
         self.pre_filter_current_path: Path | None = None
+        self.archive_index_cache = ArchiveIndexCache()
 
         OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
         self._build_ui()
@@ -842,6 +844,7 @@ class FileFinderWindow(QMainWindow):
                             texture_types=texture_tracking,
                             auto_decode_nx_xml=auto_decode_nx_xml,
                             suppressed_error_callback=record_tracking_error,
+                            index_cache=self.archive_index_cache,
                         )
                     )
                 else:
@@ -851,6 +854,7 @@ class FileFinderWindow(QMainWindow):
                             [raw_path],
                             output_root=OUTPUT_ROOT,
                             auto_decode_nx_xml=auto_decode_nx_xml,
+                            index_cache=self.archive_index_cache,
                         )
                     )
             except Exception as exc:

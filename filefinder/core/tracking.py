@@ -10,6 +10,7 @@ import sys
 from typing import Callable
 import xml.etree.ElementTree as ET
 
+from filefinder.archive.idx_wpk import ArchiveIndexCache
 from filefinder.lookup.thy import ThyLookupTable
 
 from .extract import ExtractionReport, ParsedInput, extract_assets
@@ -52,6 +53,7 @@ def extract_assets_with_tracking(
     texture_types: set[str],
     auto_decode_nx_xml: bool = True,
     suppressed_error_callback: TrackingErrorCallback | None = None,
+    index_cache: ArchiveIndexCache | None = None,
 ) -> ExtractionReport:
     token = _TRACKING_ERROR_CALLBACK.set(suppressed_error_callback)
     try:
@@ -62,6 +64,7 @@ def extract_assets_with_tracking(
             file_types=file_types,
             texture_types=texture_types,
             auto_decode_nx_xml=auto_decode_nx_xml,
+            index_cache=index_cache,
         )
     finally:
         _TRACKING_ERROR_CALLBACK.reset(token)
@@ -75,6 +78,7 @@ def _extract_assets_with_tracking_impl(
     file_types: set[str],
     texture_types: set[str],
     auto_decode_nx_xml: bool,
+    index_cache: ArchiveIndexCache | None,
 ) -> ExtractionReport:
     archives = discover_archives(game_root)
     if not archives:
@@ -92,6 +96,7 @@ def _extract_assets_with_tracking_impl(
             raw_paths,
             output_root=output_root,
             auto_decode_nx_xml=auto_decode_nx_xml,
+            index_cache=index_cache,
         )
     ]
 
@@ -109,6 +114,7 @@ def _extract_assets_with_tracking_impl(
                 first_pass_raws,
                 output_root=output_root,
                 auto_decode_nx_xml=auto_decode_nx_xml,
+                index_cache=index_cache,
             )
         )
 
@@ -132,6 +138,7 @@ def _extract_assets_with_tracking_impl(
                 second_pass_raws,
                 output_root=output_root,
                 auto_decode_nx_xml=auto_decode_nx_xml,
+                index_cache=index_cache,
             )
         )
 
@@ -152,6 +159,7 @@ def _extract_assets_with_tracking_impl(
                     sorted(texture_raws),
                     output_root=output_root,
                     auto_decode_nx_xml=auto_decode_nx_xml,
+                    index_cache=index_cache,
                 )
             )
 
@@ -167,6 +175,7 @@ def _extract_optional_assets(
     *,
     output_root: Path,
     auto_decode_nx_xml: bool,
+    index_cache: ArchiveIndexCache | None,
 ) -> ExtractionReport:
     return extract_assets(
         game_root,
@@ -174,6 +183,7 @@ def _extract_optional_assets(
         output_root=output_root,
         strict_lookup=False,
         auto_decode_nx_xml=auto_decode_nx_xml,
+        index_cache=index_cache,
     )
 
 

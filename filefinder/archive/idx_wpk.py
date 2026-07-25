@@ -54,10 +54,41 @@ class LoadedEntry(IndexEntry):
     unwrap_layers: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class CachedArchiveIndex:
+    file_count: int
+    entries_by_hash: dict[str, IndexEntry]
+
+
+class ArchiveIndexCache:
+    """Process-local IDX/WPK metadata cache keyed by archive path."""
+
+    def __init__(self) -> None:
+        self._cache: dict[Path, CachedArchiveIndex] = {}
+
+    def get(self, archive_path: Path) -> CachedArchiveIndex:
+        key = Path(archive_path).resolve(strict=False)
+        cached = self._cache.get(key)
+        if cached is None:
+            cached = build_cached_archive_index(key)
+            self._cache[key] = cached
+        return cached
+
+    def clear(self) -> None:
+        self._cache.clear()
+
+
 class IDXWPKArchive:
     """Open one IDX/WPK archive and extract selected entries by Hash128 hex."""
 
-    def __init__(self, file_path: Path, *, target_hashes: set[str] | None = None):
+    def __init__(
+        self,
+        file_path: Path,
+        *,
+        target_hashes: set[str] | None = None,
+        preloaded_indices: list[IndexEntry] | None = None,
+        preloaded_file_count: int | None = None,
+    ):
         self.file_path = Path(file_path)
         self.target_hashes = {value.lower() for value in target_hashes or set()}
         self.entries: dict[int, LoadedEntry] = {}
@@ -79,15 +110,24 @@ class IDXWPKArchive:
         if magic == b"SKPW":
             self.mode = "idx"
             self.idx_path = self.file_path
-            with self.file_path.open("rb") as file:
-                self._read_idx_header(file)
-                self._read_idx_indices(file)
+            if preloaded_indices is not None:
+                self.indices = preloaded_indices
+                self.file_count = preloaded_file_count or len(preloaded_indices)
+            else:
+                with self.file_path.open("rb") as file:
+                    self._read_idx_header(file)
+                    self._read_idx_indices(file)
         elif magic == WPK_MAGIC:
             self.mode = "wpk"
             self.wpk_path = self.file_path
-            with self.file_path.open("rb") as file:
-                self._read_wpk_header(file)
-                self._scan_wpk_indices(file)
+            self._wpk_paths[0] = str(self.file_path)
+            if preloaded_indices is not None:
+                self.indices = preloaded_indices
+                self.file_count = preloaded_file_count or len(preloaded_indices)
+            else:
+                with self.file_path.open("rb") as file:
+                    self._read_wpk_header(file)
+                    self._scan_wpk_indices(file)
         else:
             raise ValueError(f"Unsupported IDX/WPK file type: {self.file_path}")
 
@@ -302,7 +342,7 @@ class IDXWPKArchive:
     def _load_entry_data(self, entry: LoadedEntry) -> None:
         pkg_id = entry.pkg_id
 
-        if self.mode == "idx" and self.is_slot_file_pkg(pkg_id):
+        if self.mode == "idx" and self.is_slot_file_pkg(pkg_id) and not self.has_wpk_for_pkg(pkg_id):
             raw_data = self.read_slot_file_data(entry)
             if raw_data is None:
                 raise FileNotFoundError(
@@ -373,6 +413,9 @@ class IDXWPKArchive:
         entry.file_length = len(entry.data)
         entry.file_original_length = len(entry.data)
 
+    def has_wpk_for_pkg(self, pkg_id: int) -> bool:
+        return any(os.path.exists(candidate) for candidate in self.iter_wpk_path_candidates(pkg_id))
+
 
 def build_index_from_embedded_header(
     data: bytes,
@@ -428,12 +471,45 @@ def build_index_from_embedded_header(
 def extract_matching_entries(
     archive_path: Path,
     target_hashes: set[str],
+    *,
+    index_cache: ArchiveIndexCache | None = None,
 ) -> dict[str, LoadedEntry]:
     """Return decoded entries whose raw hash is in target_hashes."""
+    target_hashes = {value.lower() for value in target_hashes}
     found: dict[str, LoadedEntry] = {}
+    if index_cache is not None:
+        cached = index_cache.get(archive_path)
+        indices = [
+            entry
+            for entry in cached.entries_by_hash.values()
+            if entry.raw_hash_hex in target_hashes
+        ]
+        with IDXWPKArchive(
+            archive_path,
+            preloaded_indices=indices,
+            preloaded_file_count=cached.file_count,
+        ) as archive:
+            for index_entry in archive.indices:
+                if index_entry.raw_hash_hex in found:
+                    continue
+                found[index_entry.raw_hash_hex] = archive.load_entry(index_entry)
+        return found
+
     with IDXWPKArchive(archive_path, target_hashes=target_hashes) as archive:
         for index_entry in archive.indices:
             if index_entry.raw_hash_hex in found:
                 continue
             found[index_entry.raw_hash_hex] = archive.load_entry(index_entry)
     return found
+
+
+def build_cached_archive_index(archive_path: Path) -> CachedArchiveIndex:
+    with IDXWPKArchive(archive_path) as archive:
+        entries_by_hash: dict[str, IndexEntry] = {}
+        for entry in archive.indices:
+            if entry.raw_hash_hex:
+                entries_by_hash.setdefault(entry.raw_hash_hex, entry)
+        return CachedArchiveIndex(
+            file_count=archive.file_count,
+            entries_by_hash=entries_by_hash,
+        )

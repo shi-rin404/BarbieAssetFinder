@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from filefinder.archive.idx_wpk import LoadedEntry, extract_matching_entries
+from filefinder.archive.idx_wpk import ArchiveIndexCache, LoadedEntry, extract_matching_entries
 from filefinder.lookup.thy import LookupResult, ThyLookupTable
 
 from .neox_xml import NEOX_BINARY_MAGIC, neox_bytes_to_text
@@ -115,6 +115,7 @@ def _extract_lookups(
     *,
     output_root: Path,
     auto_decode_nx_xml: bool,
+    index_cache: ArchiveIndexCache | None = None,
 ) -> tuple[list[WrittenAsset], list[MissingAsset]]:
     written: list[WrittenAsset] = []
     missing: list[MissingAsset] = []
@@ -128,7 +129,7 @@ def _extract_lookups(
         found_entries: dict[str, tuple[Path, LoadedEntry]] = {}
 
         for idx_path in archive.idx_paths:
-            found = extract_matching_entries(idx_path, remaining)
+            found = extract_matching_entries(idx_path, remaining, index_cache=index_cache)
             for hash_hex, entry in found.items():
                 if hash_hex not in found_entries:
                     found_entries[hash_hex] = (idx_path, entry)
@@ -186,6 +187,7 @@ def extract_assets(
     output_root: Path,
     strict_lookup: bool = True,
     auto_decode_nx_xml: bool = True,
+    index_cache: ArchiveIndexCache | None = None,
 ) -> ExtractionReport:
     archives = discover_archives(game_root)
     if not archives:
@@ -216,6 +218,7 @@ def extract_assets(
         lookups,
         output_root=output_root,
         auto_decode_nx_xml=auto_decode_nx_xml,
+        index_cache=index_cache,
     )
 
     written_keys = {_request_key(item.request) for item in written}
@@ -239,6 +242,7 @@ def extract_assets(
         fallback_lookups,
         output_root=output_root,
         auto_decode_nx_xml=auto_decode_nx_xml,
+        index_cache=index_cache,
     )
 
     missing = [
