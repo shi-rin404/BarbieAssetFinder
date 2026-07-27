@@ -110,18 +110,27 @@ def build_staging_tree(staging_root: Path, version: str) -> tuple[Path, list[str
     return staging_root, managed
 
 
-def write_zip(source_root: Path, managed_files: list[str], archive_path: Path) -> None:
+def payload_sha256(source_root: Path, managed_files: list[str]) -> str:
+    digest = hashlib.sha256()
+    for relative in managed_files:
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update((source_root / relative).read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def write_zip(
+    source_root: Path,
+    managed_files: list[str],
+    archive_path: Path,
+    manifest_name: str,
+    manifest: dict,
+) -> None:
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for relative in managed_files:
             archive.write(source_root / relative, relative)
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+        archive.writestr(manifest_name, json.dumps(manifest, indent=4) + "\n")
 
 
 def source_commit() -> str:
@@ -150,26 +159,23 @@ def main() -> int:
     archive_name = f"{ASSET_PREFIX}-v{version}.zip"
     manifest_name = f"{ASSET_PREFIX}-v{version}.json"
     archive_path = output_dir / archive_name
-    manifest_path = output_dir / manifest_name
 
     with tempfile.TemporaryDirectory(prefix="filefinder_release_bundle_") as temp_dir:
         staging_root, managed_files = build_staging_tree(Path(temp_dir), version)
-        write_zip(staging_root, managed_files, archive_path)
-
-    manifest = {
-        "version": version,
-        "updater_api_version": UPDATER_API_VERSION,
-        "min_current_version": args.min_current_version.strip().lstrip("v"),
-        "sha256": file_sha256(archive_path),
-        "archive_name": archive_name,
-        "source_commit": source_commit(),
-        "managed_files": managed_files,
-        "notes": args.notes,
-    }
-    manifest_path.write_text(json.dumps(manifest, indent=4) + "\n", encoding="utf-8")
+        manifest = {
+            "version": version,
+            "updater_api_version": UPDATER_API_VERSION,
+            "min_current_version": args.min_current_version.strip().lstrip("v"),
+            "sha256": payload_sha256(staging_root, managed_files),
+            "archive_name": archive_name,
+            "source_commit": source_commit(),
+            "managed_files": managed_files,
+            "notes": args.notes,
+        }
+        write_zip(staging_root, managed_files, archive_path, manifest_name, manifest)
 
     print(f"Wrote {archive_path}")
-    print(f"Wrote {manifest_path}")
+    print(f"Embedded {manifest_name}")
     return 0
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import importlib
 import importlib.util
 import json
@@ -33,6 +34,8 @@ INSTALLED_MANIFEST_PATH = Path(__file__).resolve().parents[2] / USER_DIR_NAME / 
 class ReleaseAsset:
     name: str
     url: str
+    nested_path: str = ""
+    manifest_nested_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -107,11 +110,32 @@ def _request_json(url: str) -> dict:
     return json.loads(_request_bytes(url, timeout=20).decode("utf-8"))
 
 
-def _download_file(url: str, target_path: Path) -> None:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=120) as response:
-        with target_path.open("wb") as output:
-            shutil.copyfileobj(response, output)
+def _release_asset_bytes(asset: ReleaseAsset, *, timeout: int) -> bytes:
+    data = _request_bytes(asset.url, timeout=timeout)
+    if not asset.nested_path:
+        return data
+
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        return archive.read(asset.nested_path)
+
+
+def _zip_payload_sha256(archive_path: Path, manifest_name: str = "") -> str:
+    digest = hashlib.sha256()
+    with zipfile.ZipFile(archive_path) as archive:
+        names = sorted(
+            name
+            for name in archive.namelist()
+            if not name.endswith("/")
+            and name != manifest_name
+            and "__pycache__" not in Path(name).parts
+            and Path(name).suffix not in {".pyc", ".pyo"}
+        )
+        for name in names:
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(archive.read(name))
+            digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _release_assets(release: dict) -> list[ReleaseAsset]:
@@ -136,6 +160,13 @@ def _select_manifest_asset(assets: list[ReleaseAsset]) -> ReleaseAsset:
     return sorted(candidates, key=lambda item: item.name)[-1]
 
 
+def _select_manifest_asset_or_none(assets: list[ReleaseAsset]) -> ReleaseAsset | None:
+    try:
+        return _select_manifest_asset(assets)
+    except ValueError:
+        return None
+
+
 def _select_archive_asset(assets: list[ReleaseAsset], manifest: UpdateManifest) -> ReleaseAsset:
     by_name = {asset.name: asset for asset in assets}
     if manifest.archive_name in by_name:
@@ -150,6 +181,113 @@ def _select_archive_asset(assets: list[ReleaseAsset], manifest: UpdateManifest) 
     if not candidates:
         raise ValueError("Latest release does not include a FileFinderV2 zip")
     return sorted(candidates, key=lambda item: item.name)[-1]
+
+
+def _select_archive_asset_or_none(assets: list[ReleaseAsset]) -> ReleaseAsset | None:
+    candidates = [
+        asset
+        for asset in assets
+        if asset.name.lower().startswith(FILEFINDER_ASSET_PREFIX)
+        and asset.name.lower().endswith(".zip")
+    ]
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: item.name)[-1]
+
+
+def _embedded_manifest_member(archive: zipfile.ZipFile, archive_name: str) -> str | None:
+    expected = f"{Path(archive_name).stem}.json"
+    names = [
+        name
+        for name in archive.namelist()
+        if not name.endswith("/")
+        and Path(name).name.lower().startswith(FILEFINDER_ASSET_PREFIX)
+        and Path(name).name.lower().endswith(".json")
+    ]
+    for name in names:
+        if Path(name).name == expected:
+            return name
+    return sorted(names)[-1] if names else None
+
+
+def _manifest_from_archive_bytes(data: bytes, archive_name: str) -> tuple[UpdateManifest, str]:
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        manifest_member = _embedded_manifest_member(archive, archive_name)
+        if manifest_member is None:
+            raise ValueError("FileFinderV2 zip does not include an embedded manifest")
+        return parse_manifest(archive.read(manifest_member)), manifest_member
+
+
+def _source_zip_url(release: dict) -> str:
+    url = str(release.get("zipball_url", ""))
+    if not url:
+        raise ValueError("Latest release does not include a FileFinderV2 manifest or source zip")
+    return url
+
+
+def _find_source_member(names: list[str], filename: str) -> str:
+    candidates = [
+        name
+        for name in names
+        if name.replace("\\", "/").endswith(f"/dist/{filename}")
+        or name.replace("\\", "/") == f"dist/{filename}"
+    ]
+    if not candidates:
+        raise ValueError(f"Source zip does not include dist/{filename}")
+    return sorted(candidates)[-1]
+
+
+def _is_dist_member(name: str) -> bool:
+    normalized = name.replace("\\", "/")
+    return normalized.startswith("dist/") or "/dist/" in normalized
+
+
+def _fetch_latest_from_source_zip(release: dict) -> tuple[UpdateManifest, ReleaseAsset]:
+    source_url = _source_zip_url(release)
+    source_data = _request_bytes(source_url, timeout=120)
+    with zipfile.ZipFile(io.BytesIO(source_data)) as archive:
+        names = archive.namelist()
+        archive_names = [
+            name
+            for name in names
+            if name.replace("\\", "/").endswith(".zip")
+            and _is_dist_member(name)
+            and Path(name).name.lower().startswith(FILEFINDER_ASSET_PREFIX)
+        ]
+        for archive_member in sorted(archive_names, key=lambda value: Path(value).name, reverse=True):
+            archive_name = Path(archive_member).name
+            try:
+                manifest, manifest_nested_path = _manifest_from_archive_bytes(
+                    archive.read(archive_member),
+                    archive_name,
+                )
+                return manifest, ReleaseAsset(
+                    name=archive_name,
+                    url=source_url,
+                    nested_path=archive_member,
+                    manifest_nested_path=manifest_nested_path,
+                )
+            except Exception:
+                continue
+
+        manifest_names = [
+            name
+            for name in names
+            if name.replace("\\", "/").endswith(".json")
+            and _is_dist_member(name)
+            and Path(name).name.lower().startswith(FILEFINDER_ASSET_PREFIX)
+        ]
+        if not manifest_names:
+            raise ValueError("Latest release does not include a FileFinderV2 manifest")
+
+        manifest_member = sorted(manifest_names, key=lambda value: Path(value).name)[-1]
+        manifest = parse_manifest(archive.read(manifest_member))
+        archive_member = _find_source_member(names, manifest.archive_name)
+        return manifest, ReleaseAsset(
+            name=manifest.archive_name,
+            url=source_url,
+            nested_path=archive_member,
+        )
 
 
 def _normalize_managed_path(value: str) -> str:
@@ -200,8 +338,26 @@ def parse_manifest(data: bytes) -> UpdateManifest:
 def fetch_latest_release() -> tuple[UpdateManifest, ReleaseAsset]:
     release = _request_json(LATEST_RELEASE_API)
     assets = _release_assets(release)
-    manifest_asset = _select_manifest_asset(assets)
-    manifest = parse_manifest(_request_bytes(manifest_asset.url, timeout=20))
+    archive_asset = _select_archive_asset_or_none(assets)
+    if archive_asset is not None:
+        try:
+            manifest, manifest_nested_path = _manifest_from_archive_bytes(
+                _release_asset_bytes(archive_asset, timeout=120),
+                archive_asset.name,
+            )
+            return manifest, ReleaseAsset(
+                name=archive_asset.name,
+                url=archive_asset.url,
+                manifest_nested_path=manifest_nested_path,
+            )
+        except Exception:
+            pass
+
+    manifest_asset = _select_manifest_asset_or_none(assets)
+    if manifest_asset is None:
+        return _fetch_latest_from_source_zip(release)
+
+    manifest = parse_manifest(_release_asset_bytes(manifest_asset, timeout=20))
     archive_asset = _select_archive_asset(assets, manifest)
     return manifest, archive_asset
 
@@ -264,7 +420,14 @@ def _zip_file_set(source_root: Path) -> set[str]:
     return {
         path.relative_to(source_root).as_posix()
         for path in source_root.rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}
+        if path.is_file()
+        and "__pycache__" not in path.parts
+        and path.suffix not in {".pyc", ".pyo"}
+        and not (
+            path.parent == source_root
+            and path.name.lower().startswith(FILEFINDER_ASSET_PREFIX)
+            and path.suffix.lower() == ".json"
+        )
     }
 
 
@@ -409,8 +572,12 @@ def install_latest_update() -> UpdateInstallResult:
         temp_root = Path(temp_dir)
         archive_path = temp_root / manifest.archive_name
         extract_root = temp_root / "extract"
-        _download_file(archive_asset.url, archive_path)
-        actual_sha256 = sha256(archive_path)
+        archive_path.write_bytes(_release_asset_bytes(archive_asset, timeout=120))
+        actual_sha256 = (
+            _zip_payload_sha256(archive_path, archive_asset.manifest_nested_path)
+            if archive_asset.manifest_nested_path
+            else sha256(archive_path)
+        )
         if actual_sha256 != manifest.sha256:
             raise ValueError(
                 f"Update checksum mismatch: expected {manifest.sha256}, got {actual_sha256}"

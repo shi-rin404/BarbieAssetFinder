@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 API_VERSION = 1
-ASSET_PREFIX = "idvmi-asset-finder"
+ASSET_PREFIX = "idvmi-api"
 REQUIRED_FILES = (
     "archive/__init__.py",
     "archive/codecs.py",
@@ -126,18 +126,18 @@ class AssetIndex:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build the IDVMI-Tools built-in asset finder release bundle."
+        description="Build the IDVMI-Tools built-in API release bundle."
     )
-    parser.add_argument("--version", required=True, help="Asset finder version, for example 0.2.0")
+    parser.add_argument("--version", required=True, help="IDVMI API version, for example 0.2.0")
     parser.add_argument(
         "--min-addon-version",
         default="8.1.0",
-        help="Minimum IDVMI-Tools add-on version required by this asset finder bundle.",
+        help="Minimum IDVMI-Tools add-on version required by this IDVMI API bundle.",
     )
     parser.add_argument(
         "--output-dir",
         default="dist",
-        help="Directory where the zip and manifest files will be written.",
+        help="Directory where the zip file will be written.",
     )
     parser.add_argument("--notes", default="", help="Short release notes for the manifest.")
     return parser.parse_args()
@@ -173,20 +173,32 @@ def build_staging_tree(staging_root: Path, version: str) -> Path:
     return package_root
 
 
-def write_zip(source_root: Path, archive_path: Path) -> None:
-    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for path in sorted(source_root.rglob("*")):
-            if path.is_dir() or "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
-                continue
-            archive.write(path, path.relative_to(source_root.parent).as_posix())
+def package_files(source_root: Path) -> list[str]:
+    return [
+        path.relative_to(source_root.parent).as_posix()
+        for path in sorted(source_root.rglob("*"))
+        if path.is_file()
+        and "__pycache__" not in path.parts
+        and path.suffix not in {".pyc", ".pyo"}
+    ]
 
 
-def file_sha256(path: Path) -> str:
+def payload_sha256(source_root: Path, files: list[str]) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+    for relative in files:
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update((source_root.parent / relative).read_bytes())
+        digest.update(b"\0")
     return digest.hexdigest()
+
+
+def write_zip(source_root: Path, archive_path: Path, manifest_name: str, manifest: dict) -> None:
+    files = package_files(source_root)
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for relative in files:
+            archive.write(source_root.parent / relative, relative)
+        archive.writestr(manifest_name, json.dumps(manifest, indent=4) + "\n")
 
 
 def source_commit() -> str:
@@ -215,25 +227,23 @@ def main() -> int:
     archive_name = f"{ASSET_PREFIX}-v{version}.zip"
     manifest_name = f"{ASSET_PREFIX}-v{version}.json"
     archive_path = output_dir / archive_name
-    manifest_path = output_dir / manifest_name
 
     with tempfile.TemporaryDirectory(prefix="idvmi_asset_finder_bundle_") as temp_dir:
         package_root = build_staging_tree(Path(temp_dir), version)
-        write_zip(package_root, archive_path)
-
-    manifest = {
-        "version": version,
-        "api_version": API_VERSION,
-        "min_addon_version": args.min_addon_version.strip().lstrip("v"),
-        "sha256": file_sha256(archive_path),
-        "archive_name": archive_name,
-        "source_commit": source_commit(),
-        "notes": args.notes,
-    }
-    manifest_path.write_text(json.dumps(manifest, indent=4) + "\n", encoding="utf-8")
+        files = package_files(package_root)
+        manifest = {
+            "version": version,
+            "api_version": API_VERSION,
+            "min_addon_version": args.min_addon_version.strip().lstrip("v"),
+            "sha256": payload_sha256(package_root, files),
+            "archive_name": archive_name,
+            "source_commit": source_commit(),
+            "notes": args.notes,
+        }
+        write_zip(package_root, archive_path, manifest_name, manifest)
 
     print(f"Wrote {archive_path}")
-    print(f"Wrote {manifest_path}")
+    print(f"Embedded {manifest_name}")
     return 0
 
 
