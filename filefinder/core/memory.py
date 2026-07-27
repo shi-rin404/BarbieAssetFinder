@@ -14,7 +14,7 @@ from rich.padding import Padding
 from rich.panel import Panel
 
 MEMORY_PATH = Path(__file__).resolve().parents[2] / "user" / "memory.json"
-DEFAULT_MEMORY = {"game_root": ""}
+DEFAULT_MEMORY = {"game_root": "", "self_update_enabled": True}
 DEFAULT_EXECUTABLE_RELATIVE_PATH = Path(
     base64.decodebytes(
         b"TG9hZGluZyBCYXkgR2FtZXMvSWRlbnRpdHkgVi9kd3JnLmV4ZQ=="
@@ -31,7 +31,7 @@ def ensure_memory_file() -> None:
         )
 
 
-def load_memory() -> dict[str, str]:
+def load_memory() -> dict[str, object]:
     ensure_memory_file()
     try:
         data = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
@@ -43,14 +43,39 @@ def load_memory() -> dict[str, str]:
     game_root = data.get("game_root", "")
     if not isinstance(game_root, str):
         game_root = ""
-    return {"game_root": game_root}
+    self_update_enabled = data.get("self_update_enabled", True)
+    if not isinstance(self_update_enabled, bool):
+        self_update_enabled = True
+    normalized = data.copy()
+    normalized["game_root"] = game_root
+    normalized["self_update_enabled"] = self_update_enabled
+    if normalized != data:
+        save_memory(normalized)
+    return normalized
+
+
+def save_memory(data: dict[str, object]) -> None:
+    ensure_memory_file()
+    normalized = DEFAULT_MEMORY.copy()
+    normalized.update(data)
+    MEMORY_PATH.write_text(json.dumps(normalized, indent=2) + "\n", encoding="utf-8")
 
 
 def save_game_root(game_root: Path) -> None:
     ensure_memory_file()
     data = load_memory()
     data["game_root"] = str(game_root)
-    MEMORY_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    save_memory(data)
+
+
+def is_self_update_enabled() -> bool:
+    return bool(load_memory().get("self_update_enabled", True))
+
+
+def save_self_update_enabled(enabled: bool) -> None:
+    data = load_memory()
+    data["self_update_enabled"] = bool(enabled)
+    save_memory(data)
 
 
 def find_default_game_executable() -> Path | None:
@@ -120,7 +145,7 @@ def resolve_game_root(cli_game_root: Path | None) -> Path:
         return cli_game_root.resolve()
 
     memory = load_memory()
-    stored_game_root = memory["game_root"].strip()
+    stored_game_root = str(memory["game_root"]).strip()
     if stored_game_root:
         return Path(stored_game_root)
 

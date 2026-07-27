@@ -6,14 +6,17 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import threading
+import os
 from pathlib import Path
 
-from PySide6.QtCore import QDir, QMimeData, QModelIndex, QSortFilterProxyModel, Qt, QUrl, Signal
+from PySide6.QtCore import QDir, QMimeData, QModelIndex, QProcess, QSortFilterProxyModel, Qt, QUrl, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QCursor, QDesktopServices, QDrag, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QDialog,
     QFileDialog,
     QFileSystemModel,
     QFrame,
@@ -27,9 +30,11 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QStyle,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QTreeView,
     QVBoxLayout,
     QWidget,
@@ -37,10 +42,13 @@ from PySide6.QtWidgets import (
 
 from filefinder.archive.idx_wpk import ArchiveIndexCache
 from filefinder.core.extract import ExtractionReport, extract_assets
+from filefinder.core import self_update
 from filefinder.core.memory import (
     find_default_game_executable,
+    is_self_update_enabled,
     load_memory,
     save_game_root,
+    save_self_update_enabled,
 )
 from filefinder.core.mod_copy import ModCopyResult, copy_report_to_mod_folder
 from filefinder.core.paths import discover_archives, parse_asset_path
@@ -315,7 +323,58 @@ class CheckableComboBox(QPushButton):
             action.blockSignals(previous_state)
 
 
+class SettingsDialog(QDialog):
+    def __init__(self, parent: "FileFinderWindow") -> None:
+        super().__init__(parent)
+        self.parent_window = parent
+        self.setWindowTitle("Settings")
+        self.setModal(False)
+        self.resize(420, 220)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+
+        self.auto_update_checkbox = QCheckBox("Enable automatic updates")
+        self.auto_update_checkbox.setChecked(is_self_update_enabled())
+        self.current_version_label = QLabel(f"Current version: {self_update.format_version(self_update.current_version())}")
+        self.latest_version_label = QLabel("Latest version: unknown")
+        self.status_label = QLabel("Last update status: Ready")
+        self.status_label.setWordWrap(True)
+
+        button_row = QHBoxLayout()
+        self.check_button = QPushButton("Check for Updates")
+        self.install_button = QPushButton("Install Update")
+        self.install_button.setEnabled(False)
+        button_row.addWidget(self.check_button)
+        button_row.addWidget(self.install_button)
+
+        layout.addWidget(self.auto_update_checkbox)
+        layout.addWidget(self.current_version_label)
+        layout.addWidget(self.latest_version_label)
+        layout.addWidget(self.status_label)
+        layout.addStretch(1)
+        layout.addLayout(button_row)
+
+        self.auto_update_checkbox.toggled.connect(save_self_update_enabled)
+        self.check_button.clicked.connect(lambda: self.parent_window.start_self_update(check_only=True, manual=True))
+        self.install_button.clicked.connect(lambda: self.parent_window.start_self_update(check_only=False, manual=True, force_install=True))
+
+        self.refresh_from_parent()
+
+    def refresh_from_parent(self) -> None:
+        state = self.parent_window.update_state
+        self.current_version_label.setText(f"Current version: {self_update.format_version(self_update.current_version())}")
+        latest = state.get("latest_version") or "unknown"
+        self.latest_version_label.setText(f"Latest version: {latest}")
+        self.status_label.setText(f"Last update status: {state.get('status', 'Ready')}")
+        self.install_button.setEnabled(bool(state.get("available")) and not self.parent_window.update_running)
+        self.check_button.setEnabled(not self.parent_window.update_running)
+
+
 class FileFinderWindow(QMainWindow):
+    update_finished = Signal(object, object, bool, bool)
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("FileFinder V2")
@@ -326,6 +385,13 @@ class FileFinderWindow(QMainWindow):
         self.last_cut_paths: list[Path] = []
         self.pre_filter_current_path: Path | None = None
         self.archive_index_cache = ArchiveIndexCache()
+        self.settings_dialog: SettingsDialog | None = None
+        self.update_running = False
+        self.update_state: dict[str, object] = {
+            "status": "Ready",
+            "latest_version": "",
+            "available": False,
+        }
 
         OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
         self._build_ui()
@@ -333,6 +399,8 @@ class FileFinderWindow(QMainWindow):
         self._apply_theme()
         self._resolve_game_root()
         self._setup_file_model()
+        if is_self_update_enabled() and not self_update.restarted_after_update():
+            self.start_self_update(check_only=False, manual=False)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -348,6 +416,15 @@ class FileFinderWindow(QMainWindow):
         self.game_root_label.setObjectName("MutedLabel")
         self.change_game_root_button = QPushButton("Change")
         self.change_game_root_button.setObjectName("SubtleButton")
+        settings_scope = QFrame()
+        settings_scope.setObjectName("HeaderScope")
+        settings_scope_layout = QHBoxLayout(settings_scope)
+        settings_scope_layout.setContentsMargins(6, 6, 6, 6)
+        self.settings_button = QToolButton()
+        self.settings_button.setObjectName("IconButton")
+        self.settings_button.setToolTip("Settings")
+        self.settings_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
+        settings_scope_layout.addWidget(self.settings_button)
         game_root_scope = QFrame()
         game_root_scope.setObjectName("HeaderScope")
         game_root_scope_layout = QHBoxLayout(game_root_scope)
@@ -356,6 +433,7 @@ class FileFinderWindow(QMainWindow):
         game_root_scope_layout.addWidget(self.game_root_label, 1)
         game_root_scope_layout.addWidget(self.change_game_root_button)
         header.addWidget(title, 8)
+        header.addWidget(settings_scope, 0)
         header.addWidget(game_root_scope, 3)
         root.addLayout(header)
 
@@ -483,11 +561,13 @@ class FileFinderWindow(QMainWindow):
         self.mod_folder_checkbox.toggled.connect(self.on_mod_folder_toggled)
         self.browse_mod_folder_button.clicked.connect(self.choose_mod_folder)
         self.change_game_root_button.clicked.connect(self.change_game_root)
+        self.settings_button.clicked.connect(self.open_settings_dialog)
         self.clear_output_button.clicked.connect(self.clear_output_folder)
         self.search_input.textChanged.connect(self.apply_file_filter)
         self.path_table.customContextMenuRequested.connect(self.open_queue_context_menu)
         self.file_tree.customContextMenuRequested.connect(self.open_context_menu)
         self.file_tree.doubleClicked.connect(self.open_file_from_index)
+        self.update_finished.connect(self.on_self_update_finished)
 
         add_return_shortcut = QShortcut(QKeySequence(Qt.Key_Return), self.path_input, activated=self.add_path)
         add_return_shortcut.setContext(Qt.WidgetShortcut)
@@ -499,6 +579,103 @@ class FileFinderWindow(QMainWindow):
         QShortcut(QKeySequence.Copy, self.file_tree, activated=self.copy_selected_files)
         QShortcut(QKeySequence.Cut, self.file_tree, activated=self.cut_selected_files)
         QShortcut(QKeySequence.Delete, self.file_tree, activated=self.delete_selected_files)
+
+    def open_settings_dialog(self) -> None:
+        if self.settings_dialog is None:
+            self.settings_dialog = SettingsDialog(self)
+        self.settings_dialog.refresh_from_parent()
+        self.settings_dialog.show()
+        self.settings_dialog.raise_()
+        self.settings_dialog.activateWindow()
+
+    def start_self_update(
+        self,
+        *,
+        check_only: bool,
+        manual: bool,
+        force_install: bool = False,
+    ) -> None:
+        if self.update_running:
+            return
+        self.update_running = True
+        self.update_state["status"] = "Checking for updates..."
+        self.status_label.setText("Checking for updates...")
+        if self.settings_dialog is not None:
+            self.settings_dialog.refresh_from_parent()
+
+        def worker() -> None:
+            result: object | None = None
+            error: object | None = None
+            try:
+                if check_only:
+                    result = self_update.check_for_update()
+                elif force_install:
+                    result = self_update.install_latest_update()
+                else:
+                    check_result = self_update.check_for_update()
+                    if check_result.available:
+                        result = self_update.install_latest_update()
+                    else:
+                        result = check_result
+            except Exception as exc:
+                error = exc
+            self.update_finished.emit(result, error, check_only, manual)
+
+        threading.Thread(target=worker, name="FileFinderSelfUpdate", daemon=True).start()
+
+    def on_self_update_finished(
+        self,
+        result: object,
+        error: object,
+        check_only: bool,
+        manual: bool,
+    ) -> None:
+        self.update_running = False
+        if error is not None:
+            status = f"Update failed: {error}"
+            self.update_state.update({"status": status, "available": False})
+            self.status_label.setText(status)
+            if manual:
+                QMessageBox.warning(self, "Update", status)
+            if self.settings_dialog is not None:
+                self.settings_dialog.refresh_from_parent()
+            return
+
+        if isinstance(result, self_update.UpdateCheckResult):
+            self.update_state.update(
+                {
+                    "status": result.status,
+                    "latest_version": result.latest_version,
+                    "available": result.available,
+                }
+            )
+            self.status_label.setText(result.status)
+            if manual:
+                QMessageBox.information(self, "Update", result.status)
+        elif isinstance(result, self_update.UpdateInstallResult):
+            latest_version = self_update.format_version(result.manifest.version)
+            self.update_state.update(
+                {
+                    "status": result.status,
+                    "latest_version": latest_version,
+                    "available": False,
+                }
+            )
+            self.status_label.setText(result.status)
+            if result.installed:
+                if manual:
+                    QMessageBox.information(self, "Update", f"{result.status}\n\nRestarting FileFinderV2.")
+                self.restart_after_update()
+                return
+
+        if self.settings_dialog is not None:
+            self.settings_dialog.refresh_from_parent()
+
+    def restart_after_update(self) -> None:
+        # QProcess.startDetached inherits the current process environment.
+        os.environ[self_update.RESTART_ENV_VAR] = "1"
+        QProcess.startDetached(sys.executable, sys.argv, str(APP_DIR))
+        QApplication.quit()
 
     def _setup_file_model(self) -> None:
         self.file_model = QFileSystemModel(self)
@@ -1302,6 +1479,17 @@ class FileFinderWindow(QMainWindow):
             }
             #SubtleButton {
                 padding: 7px 12px;
+            }
+            #IconButton {
+                background: transparent;
+                border: 0;
+                padding: 4px;
+                min-width: 28px;
+                min-height: 28px;
+            }
+            #IconButton:hover {
+                background: #242c3a;
+                border-radius: 6px;
             }
             #DangerButton {
                 background: #8b1e2d;

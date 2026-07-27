@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import re
+import os
 import sys
+import threading
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QProcess, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -31,10 +33,12 @@ from auto_mod.workflow import AutoModPrompts, AutoModResult, run_auto_mod
 from filefinder.core.memory import (
     EXECUTABLE_NAME,
     find_default_game_executable,
+    is_self_update_enabled,
     load_memory,
     save_game_root,
 )
 from filefinder.core.paths import discover_archives, parse_asset_path
+from filefinder.core import self_update
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -169,6 +173,8 @@ class GuiPrompts(AutoModPrompts):
 
 
 class AutoModWindow(QMainWindow):
+    update_finished = Signal(object, object)
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Auto Mod")
@@ -179,6 +185,9 @@ class AutoModWindow(QMainWindow):
         self._build_ui()
         self._apply_theme()
         self._resolve_game_root()
+        self.update_finished.connect(self.on_self_update_finished)
+        if is_self_update_enabled() and not self_update.restarted_after_update():
+            self.start_self_update()
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -242,6 +251,40 @@ class AutoModWindow(QMainWindow):
         self.add_button.clicked.connect(self.add_gim_path)
         self.auto_mod_button.clicked.connect(self.run_auto_mod)
         self.gim_input.returnPressed.connect(self.add_gim_path)
+
+    def start_self_update(self) -> None:
+        self.status_label.setText("Checking for updates...")
+
+        def worker() -> None:
+            result: object | None = None
+            error: object | None = None
+            try:
+                check_result = self_update.check_for_update()
+                if check_result.available:
+                    result = self_update.install_latest_update()
+                else:
+                    result = check_result
+            except Exception as exc:
+                error = exc
+            self.update_finished.emit(result, error)
+
+        threading.Thread(target=worker, name="FileFinderAutoModSelfUpdate", daemon=True).start()
+
+    def on_self_update_finished(self, result: object, error: object) -> None:
+        if error is not None:
+            self.status_label.setText(f"Update failed: {error}")
+            return
+        if isinstance(result, self_update.UpdateInstallResult) and result.installed:
+            self.status_label.setText(result.status)
+            self.restart_after_update()
+            return
+        if isinstance(result, self_update.UpdateCheckResult):
+            self.status_label.setText(result.status)
+
+    def restart_after_update(self) -> None:
+        os.environ[self_update.RESTART_ENV_VAR] = "1"
+        QProcess.startDetached(sys.executable, sys.argv, str(APP_DIR))
+        QApplication.quit()
 
     def _resolve_game_root(self) -> None:
         memory = load_memory()

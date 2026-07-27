@@ -1,3 +1,4 @@
 {
-"game_root": ""
+  "game_root": "",
+  "self_update_enabled": true
 }

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import logging
+import os
 import sys
 import tkinter as tk
 import time
@@ -13,7 +14,8 @@ from pathlib import Path
 from tkinter import filedialog
 
 from filefinder.core.extract import extract_assets
-from filefinder.core.memory import resolve_game_root
+from filefinder.core import self_update
+from filefinder.core.memory import is_self_update_enabled, resolve_game_root
 from filefinder.core.mod_copy import copy_report_to_mod_folder
 from filefinder.core.output import CliOutput
 from filefinder.core.paths import discover_archives, parse_asset_path
@@ -75,6 +77,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Texture tracking types: Diffuse Normal Metal grab-all",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--no-self-update",
+        action="store_true",
+        help="Disable automatic FileFinderV2 update checks for this run",
+    )
+    parser.add_argument(
+        "--check-update",
+        action="store_true",
+        help="Check for FileFinderV2 updates and exit without installing",
+    )
+    parser.add_argument(
+        "--install-update",
+        action="store_true",
+        help="Install the latest FileFinderV2 update and restart the CLI when installed",
+    )
     return parser.parse_args(argv)
 
 
@@ -100,6 +117,53 @@ def choose_mod_folder() -> Path:
     if not selected:
         raise RuntimeError("Folder selection was cancelled")
     return Path(selected)
+
+
+def restart_cli() -> None:
+    output_args = [sys.executable, *sys.argv]
+    os.execve(sys.executable, output_args, self_update.restart_environment())
+
+
+def handle_self_update(args: argparse.Namespace, output: CliOutput) -> int | None:
+    if args.no_self_update:
+        return None
+
+    if args.check_update:
+        try:
+            result = self_update.check_for_update()
+        except Exception as exc:
+            output.error(f"Update check failed: {exc}")
+            return 1
+        output.console.print(f"[cyan]{result.status}[/cyan]")
+        if result.manifest and result.manifest.notes:
+            output.console.print(result.manifest.notes)
+        return 0
+
+    should_install = args.install_update or (
+        is_self_update_enabled() and not self_update.restarted_after_update()
+    )
+    if not should_install:
+        return None
+
+    try:
+        result = self_update.install_latest_update()
+    except Exception as exc:
+        if args.install_update:
+            output.error(f"Update install failed: {exc}")
+            return 1
+        output.console.print(f"[yellow]Update check failed:[/yellow] {exc}")
+        return None
+
+    if not result.installed:
+        if args.install_update:
+            output.console.print(f"[cyan]{result.status}[/cyan]")
+            return 0
+        return None
+
+    output.console.print(f"[green]{result.status}[/green]")
+    output.console.print("[cyan]Restarting FileFinderV2 CLI...[/cyan]")
+    restart_cli()
+    return 0
 
 
 def ask_copy_conflict(output: CliOutput, target: Path, renamed_target: Path) -> str:
@@ -452,6 +516,10 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s: %(message)s",
     )
+
+    update_exit_code = handle_self_update(args, output)
+    if update_exit_code is not None:
+        return update_exit_code
 
     try:
         game_root = resolve_game_root(args.game_root)
