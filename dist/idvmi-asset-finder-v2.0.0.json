@@ -1,9 +1,0 @@
-{
-    "version": "2.0.0",
-    "api_version": 1,
-    "min_addon_version": "8.1.0",
-    "sha256": "8b961682addea0188ba213d120245ee1493b38a7b93c4ebebb819ddafbd4e88f",
-    "archive_name": "idvmi-asset-finder-v2.0.0.zip",
-    "source_commit": "558ac3f9fdeaadddb432e98ad1057e1e1b6cb490",
-    "notes": "Blender addon auto update API"
-}
