@@ -181,3 +181,5 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+WPK_POSTFIX_BUG_NOTE.md
+release.md
