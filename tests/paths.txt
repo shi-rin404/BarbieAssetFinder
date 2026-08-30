@@ -1,0 +1,8 @@
+survivor/xiaofangyuan_panghuli_idle_016a.pse
+survivor\xiaofangyuan_panghuli_idle_016a.pse
+survivor/xiaofangyuan_panghuli_idle_016a.bpse
+survivor\xiaofangyuan_panghuli_idle_016a.bpse
+survivor/xiaofangyuan_panghuli_idle_016a.sfx
+survivor\xiaofangyuan_panghuli_idle_016a.sfx
+survivor/xiaofangyuan_panghuli_idle_016a.fx
+survivor\xiaofangyuan_panghuli_idle_016a.fx

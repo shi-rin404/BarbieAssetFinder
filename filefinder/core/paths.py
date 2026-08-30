@@ -16,8 +16,13 @@ class ArchiveSource:
     documents_res_idx: Path
 
     @property
-    def idx_paths(self) -> tuple[Path, Path]:
-        return (self.documents_res_idx, self.res_idx)
+    def idx_paths(self) -> tuple[Path, ...]:
+        """Return only the IDX copies that are available on disk."""
+        return tuple(
+            path
+            for path in (self.documents_res_idx, self.res_idx)
+            if path.is_file()
+        )
 
 
 @dataclass(frozen=True)
@@ -32,7 +37,7 @@ def archive_prefix_from_stem(stem: str) -> str:
 
 
 def discover_archives(game_root: Path) -> dict[str, ArchiveSource]:
-    """Discover IDX names that exist in both res and Documents/res."""
+    """Discover IDX names available in either res or Documents/res."""
     game_root = game_root.resolve()
     res_dir = game_root / "res"
     documents_res_dir = game_root / "Documents" / "res"
@@ -43,10 +48,10 @@ def discover_archives(game_root: Path) -> dict[str, ArchiveSource]:
         if documents_res_dir.is_dir()
         else set()
     )
-    common_names = res_names & documents_names
+    archive_names = res_names | documents_names
     archives: dict[str, ArchiveSource] = {}
 
-    for name in sorted(common_names):
+    for name in sorted(archive_names):
         stem = Path(name).stem
         prefix = archive_prefix_from_stem(stem)
         archives[prefix] = ArchiveSource(

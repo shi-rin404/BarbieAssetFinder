@@ -161,10 +161,13 @@ def _bind_socket_objects(
         socket_name = socket.attrib.get("Name", "")
         skin_first_match = re.fullmatch(rf"(?:const_)?{re.escape(skin_name)}_([a-z]+)", socket_name)
         object_first_match = re.fullmatch(rf"([a-z]+)_{re.escape(skin_name)}", socket_name)
+        guajian_match = re.fullmatch(rf"guajian_{re.escape(skin_name)}_([a-z]+)", socket_name)
         if skin_first_match:
             object_name = skin_first_match.group(1)
         elif object_first_match:
             object_name = object_first_match.group(1)
+        elif guajian_match:
+            object_name = guajian_match.group(1)
         else:
             continue
         target_path = f"{gim_folder}/{gim_name}_{object_name}.gim"

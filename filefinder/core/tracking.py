@@ -83,8 +83,8 @@ def _extract_assets_with_tracking_impl(
     archives = discover_archives(game_root)
     if not archives:
         raise FileNotFoundError(
-            f"No common .idx archives were found in {game_root / 'res'} "
-            f"and {game_root / 'Documents' / 'res'}"
+            f"No .idx archives were found in {game_root / 'res'} "
+            f"or {game_root / 'Documents' / 'res'}"
         )
 
     source_requests = [parse_asset_path(raw_path, archives) for raw_path in raw_paths]

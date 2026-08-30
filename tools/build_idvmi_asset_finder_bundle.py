@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import shutil
-import subprocess
+import sys
 import tempfile
-import zipfile
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from filefinder.version import __version__ as DEFAULT_VERSION
 
 
 API_VERSION = 1
-ASSET_PREFIX = "idvmi-api"
 REQUIRED_FILES = (
     "archive/__init__.py",
     "archive/codecs.py",
@@ -126,25 +128,23 @@ class AssetIndex:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build the IDVMI-Tools built-in API release bundle."
-    )
-    parser.add_argument("--version", required=True, help="IDVMI API version, for example 0.2.0")
-    parser.add_argument(
-        "--min-addon-version",
-        default="8.1.0",
-        help="Minimum IDVMI-Tools add-on version required by this IDVMI API bundle.",
+        description="Install the current FileFinder asset API into an IDVMI-Tools add-on tree."
     )
     parser.add_argument(
-        "--output-dir",
-        default="dist",
-        help="Directory where the zip file will be written.",
+        "addon_root",
+        type=Path,
+        help="Path to the IDVMI-Tools add-on root.",
     )
-    parser.add_argument("--notes", default="", help="Short release notes for the manifest.")
+    parser.add_argument(
+        "--version",
+        default=DEFAULT_VERSION,
+        help=f"API version written into asset_lookup.__version__. Default: {DEFAULT_VERSION}",
+    )
     return parser.parse_args()
 
 
 def repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    return REPO_ROOT
 
 
 def copy_required_file(source: Path, target: Path) -> None:
@@ -173,77 +173,56 @@ def build_staging_tree(staging_root: Path, version: str) -> Path:
     return package_root
 
 
-def package_files(source_root: Path) -> list[str]:
-    return [
-        path.relative_to(source_root.parent).as_posix()
-        for path in sorted(source_root.rglob("*"))
+def validate_addon_root(addon_root: Path) -> Path:
+    root = addon_root.resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"IDVMI-Tools add-on root was not found: {root}")
+    if not (root / "__init__.py").is_file():
+        raise FileNotFoundError(f"Add-on root does not contain __init__.py: {root}")
+    if not (root / "neox_tools").is_dir():
+        raise FileNotFoundError(f"Add-on root does not contain neox_tools: {root}")
+    return root
+
+
+def count_files(root: Path) -> int:
+    return sum(
+        1
+        for path in root.rglob("*")
         if path.is_file()
         and "__pycache__" not in path.parts
-        and path.suffix not in {".pyc", ".pyo"}
-    ]
+        and path.suffix.lower() not in {".pyc", ".pyo"}
+    )
 
 
-def payload_sha256(source_root: Path, files: list[str]) -> str:
-    digest = hashlib.sha256()
-    for relative in files:
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update((source_root.parent / relative).read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
-
-
-def write_zip(source_root: Path, archive_path: Path, manifest_name: str, manifest: dict) -> None:
-    files = package_files(source_root)
-    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for relative in files:
-            archive.write(source_root.parent / relative, relative)
-        archive.writestr(manifest_name, json.dumps(manifest, indent=4) + "\n")
-
-
-def source_commit() -> str:
+def install_asset_lookup(package_root: Path, addon_root: Path) -> tuple[Path, int]:
+    destination = (addon_root / "neox_tools" / "asset_lookup").resolve()
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repo_root(),
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-    except OSError:
-        return ""
-    if result.returncode != 0:
-        return ""
-    return result.stdout.strip()
+        destination.relative_to(addon_root)
+    except ValueError as exc:
+        raise ValueError(f"Refusing to install outside add-on root: {destination}") from exc
+
+    if destination.exists():
+        shutil.rmtree(destination)
+
+    shutil.copytree(
+        package_root,
+        destination,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+    )
+    return destination, count_files(destination)
 
 
 def main() -> int:
     args = parse_args()
-    output_dir = (repo_root() / args.output_dir).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-
+    addon_root = validate_addon_root(args.addon_root)
     version = args.version.strip().lstrip("v")
-    archive_name = f"{ASSET_PREFIX}-v{version}.zip"
-    manifest_name = f"{ASSET_PREFIX}-v{version}.json"
-    archive_path = output_dir / archive_name
 
-    with tempfile.TemporaryDirectory(prefix="idvmi_asset_finder_bundle_") as temp_dir:
+    with tempfile.TemporaryDirectory(prefix="idvmi_asset_lookup_install_") as temp_dir:
         package_root = build_staging_tree(Path(temp_dir), version)
-        files = package_files(package_root)
-        manifest = {
-            "version": version,
-            "api_version": API_VERSION,
-            "min_addon_version": args.min_addon_version.strip().lstrip("v"),
-            "sha256": payload_sha256(package_root, files),
-            "archive_name": archive_name,
-            "source_commit": source_commit(),
-            "notes": args.notes,
-        }
-        write_zip(package_root, archive_path, manifest_name, manifest)
+        destination, installed_files = install_asset_lookup(package_root, addon_root)
 
-    print(f"Wrote {archive_path}")
-    print(f"Embedded {manifest_name}")
+    print(f"Installed asset_lookup v{version} to {destination}")
+    print(f"Installed files: {installed_files}")
     return 0
 
 
