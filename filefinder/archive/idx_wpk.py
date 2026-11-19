@@ -242,10 +242,11 @@ class IDXWPKArchive:
         if custom:
             yield from push(Path(custom))
 
+        pkg_suffix = f"{pkg_id:X}"
         stem_pattern = re.escape(self.base_stem)
-        regex = re.compile(rf"^{stem_pattern}_?0*{int(pkg_id)}\.wpk$", re.IGNORECASE)
-        yield from push(self.base_dir / f"{self.base_stem}{pkg_id}.wpk")
-        yield from push(self.base_dir / f"{self.base_stem}_{pkg_id}.wpk")
+        regex = re.compile(rf"^{stem_pattern}_?0*{pkg_suffix}\.wpk$", re.IGNORECASE)
+        yield from push(self.base_dir / f"{self.base_stem}{pkg_suffix}.wpk")
+        yield from push(self.base_dir / f"{self.base_stem}_{pkg_suffix}.wpk")
 
         try:
             for name in sorted(os.listdir(self.base_dir)):
@@ -261,7 +262,7 @@ class IDXWPKArchive:
             if os.path.exists(candidate):
                 self._wpk_paths[pkg_id] = candidate
                 return candidate
-        return str(self.base_dir / f"{self.base_stem}{pkg_id}.wpk")
+        return str(self.base_dir / f"{self.base_stem}{pkg_id:X}.wpk")
 
     @staticmethod
     def is_slot_file_pkg(pkg_id: int) -> bool:
